@@ -1,0 +1,19 @@
+{
+    "compilerOptions": {
+        "baseUrl": "..",
+        "paths": {
+            "@revizahoshii/hoshino": ["dist/index.d.ts"],
+            "@revizahoshii/hoshino/store": ["dist/store/index.d.ts"],
+            "@revizahoshii/hoshino/signal": ["dist/signal/index.d.ts"],
+            "@revizahoshii/hoshino/auth": ["dist/auth/index.d.ts"],
+            "@revizahoshii/hoshino/appstate": ["dist/appstate/index.d.ts"],
+            "@revizahoshii/hoshino/retry": ["dist/retry/index.d.ts"],
+            "@revizahoshii/hoshino/proto": ["dist/proto.d.ts"],
+            "@revizahoshii/hoshino/protocol": ["dist/protocol/index.d.ts"],
+            "@revizahoshii/hoshino/crypto": ["dist/crypto/index.d.ts"],
+            "@revizahoshii/hoshino/media": ["dist/media/index.d.ts"],
+            "@revizahoshii/hoshino/util": ["dist/util/index.d.ts"],
+            "@revizahoshii/hoshino/transport": ["dist/transport/index.d.ts"]
+        }
+    }
+}

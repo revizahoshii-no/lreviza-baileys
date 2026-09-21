@@ -1,0 +1,57 @@
+{
+    "name": "@revizahoshii/hoshino-mcp-server",
+    "version": "1.2.0",
+    "description": "MCP server exposing @revizahoshii/hoshino WaClient as dynamic tools for end-to-end testing",
+    "license": "MIT",
+    "author": "vinikjkkj <contact@vinicius.email> (https://github.com/vinikjkkj)",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/revizahoshii-no/lreviza-baileys.git",
+        "directory": "packages/mcp-server"
+    },
+    "main": "dist/index.js",
+    "module": "dist/esm/index.js",
+    "types": "dist/index.d.ts",
+    "bin": {
+        "hoshino-mcp-server": "./dist/bin.js"
+    },
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "require": "./dist/index.js",
+            "import": "./dist/esm/index.js",
+            "default": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.build.cjs.json && tsc -p tsconfig.build.esm.json && node ../../scripts/finalize-esm-build.cjs",
+        "typecheck": "tsc --noEmit",
+        "test": "node --import tsx --test \"src/**/__tests__/**/*.test.ts\"",
+        "start": "node --import tsx src/bin.ts",
+        "dev": "cross-env MCP_TRANSPORT=http MCP_EVAL_ENABLED=1 MCP_LOG_LEVEL=trace MCP_AUTH_PATH=../../.auth/state.sqlite node ../../scripts/dev-watch.cjs --watch ../../src --watch ../../packages --watch ../../spec -- node --import tsx src/bin.ts"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.29.0",
+        "@revizahoshii/hoshino-media-utils": "^1.0.0",
+        "@revizahoshii/hoshino-store-sqlite": "^1.1.0",
+        "@revizahoshii/hoshino-wam": "^0.1.0",
+        "better-sqlite3": "^12.6.2"
+    },
+    "peerDependencies": {
+        "@revizahoshii/hoshino": "^1.0.0"
+    },
+    "devDependencies": {
+        "@revizahoshii/hoshino-fake-server": "file:../fake-server",
+        "cross-env": "^7.0.3",
+        "@revizahoshii/hoshino": "file:../.."
+    },
+    "engines": {
+        "node": ">=20.9.0"
+    }
+}

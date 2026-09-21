@@ -1,0 +1,287 @@
+import type { Proto } from '@proto'
+import { isGroupOrBroadcastJid, toUserJid } from '@protocol/jid'
+import { longToNumber } from '@util/primitives'
+
+export interface WaSendContextInfo {
+    readonly quotedMessageId?: string
+    readonly quotedParticipant?: string
+    readonly quotedRemoteJid?: string
+    readonly quotedMessage?: Proto.IMessage
+
+    readonly isForwarded?: boolean
+    readonly forwardingScore?: number
+
+    readonly mentionedJids?: readonly string[]
+
+    readonly isSpoiler?: boolean
+    readonly expirationSeconds?: number
+    readonly ephemeralSettingTimestamp?: number
+    readonly disappearingModeInitiator?: Proto.DisappearingMode.Initiator
+    readonly disappearingModeTrigger?: Proto.DisappearingMode.Trigger
+
+    readonly groupSubject?: string
+    readonly parentGroupJid?: string
+
+    readonly raw?: Proto.IContextInfo
+}
+
+export interface WaQuoteRef {
+    readonly id: string
+    readonly participant?: string
+    readonly remoteJid?: string
+    readonly message?: Proto.IMessage
+}
+
+export function buildContextInfoProto(input: WaSendContextInfo): Proto.IContextInfo {
+    const ctx: Proto.IContextInfo = {}
+
+    if (input.quotedMessageId !== undefined) ctx.stanzaId = input.quotedMessageId
+    if (input.quotedParticipant !== undefined) ctx.participant = input.quotedParticipant
+    if (input.quotedRemoteJid !== undefined) ctx.remoteJid = input.quotedRemoteJid
+    if (input.quotedMessage !== undefined) ctx.quotedMessage = input.quotedMessage
+
+    if (input.isForwarded !== undefined) ctx.isForwarded = input.isForwarded
+    if (input.forwardingScore !== undefined) ctx.forwardingScore = input.forwardingScore
+
+    if (input.mentionedJids && input.mentionedJids.length > 0) {
+        ctx.mentionedJid = [...input.mentionedJids]
+    }
+
+    if (input.isSpoiler !== undefined) ctx.isSpoiler = input.isSpoiler
+    if (input.expirationSeconds !== undefined) ctx.expiration = input.expirationSeconds
+    if (input.ephemeralSettingTimestamp !== undefined) {
+        ctx.ephemeralSettingTimestamp = input.ephemeralSettingTimestamp
+    }
+    if (
+        input.disappearingModeInitiator !== undefined ||
+        input.disappearingModeTrigger !== undefined
+    ) {
+        ctx.disappearingMode = {
+            ...(input.disappearingModeInitiator !== undefined
+                ? { initiator: input.disappearingModeInitiator }
+                : {}),
+            ...(input.disappearingModeTrigger !== undefined
+                ? { trigger: input.disappearingModeTrigger }
+                : {})
+        }
+    }
+
+    if (input.groupSubject !== undefined) ctx.groupSubject = input.groupSubject
+    if (input.parentGroupJid !== undefined) ctx.parentGroupJid = input.parentGroupJid
+
+    if (input.raw) {
+        Object.assign(ctx, input.raw)
+    }
+
+    return ctx
+}
+
+interface ContextInfoCarrier {
+    contextInfo?: Proto.IContextInfo | null
+}
+
+export function applyContextInfo(
+    message: Proto.IMessage,
+    ctx: WaSendContextInfo | null | undefined
+): Proto.IMessage {
+    if (!ctx) return message
+    const proto = buildContextInfoProto(ctx)
+    if (!hasAnyKey(proto)) return message
+
+    const next: Proto.IMessage = { ...message }
+
+    if (typeof next.conversation === 'string' && !next.extendedTextMessage) {
+        next.extendedTextMessage = { text: next.conversation }
+        delete next.conversation
+    }
+
+    if (!hasAnyKey(next)) {
+        next.extendedTextMessage = {}
+    }
+
+    const target = pickContextInfoTarget(next)
+    if (!target) {
+        throw new Error('cannot apply contextInfo: no compatible submessage found')
+    }
+    target.contextInfo = { ...target.contextInfo, ...proto }
+    return next
+}
+
+/**
+ * Reads the disappearing-message TTL (`contextInfo.expiration`) from the first
+ * submessage that carries it. Unwraps `ephemeralMessage` if present. Returns
+ * `undefined` when no submessage has an `expiration` set.
+ */
+export function pickIncomingExpirationSeconds(
+    message: Proto.IMessage | undefined
+): number | undefined {
+    if (!message) return undefined
+    const inner = message.ephemeralMessage?.message ?? message
+    for (const key of Object.keys(inner)) {
+        const value = (inner as Record<string, unknown>)[key]
+        if (
+            value &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            !(value instanceof Uint8Array)
+        ) {
+            const ctx = (value as ContextInfoCarrier).contextInfo
+            if (ctx?.expiration !== undefined && ctx.expiration !== null) {
+                return ctx.expiration
+            }
+        }
+    }
+    return undefined
+}
+
+/**
+ * Reads `contextInfo.ephemeralSettingTimestamp` (Unix seconds) from the first
+ * submessage that carries it. Peers stamp it on every message in a disappearing
+ * chat, which makes it the only continuously-refreshed source for the setting -
+ * history sync and `EPHEMERAL_SETTING` are point-in-time.
+ */
+export function pickIncomingEphemeralSettingTimestamp(
+    message: Proto.IMessage | undefined
+): number | undefined {
+    if (!message) return undefined
+    const inner = message.ephemeralMessage?.message ?? message
+    for (const key of Object.keys(inner)) {
+        const value = (inner as Record<string, unknown>)[key]
+        if (
+            value &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            !(value instanceof Uint8Array)
+        ) {
+            const stamp = (value as ContextInfoCarrier).contextInfo?.ephemeralSettingTimestamp
+            if (stamp !== undefined && stamp !== null) {
+                return longToNumber(stamp)
+            }
+        }
+    }
+    return undefined
+}
+
+function pickContextInfoTarget(message: Proto.IMessage): ContextInfoCarrier | null {
+    for (const key of Object.keys(message)) {
+        const value = (message as Record<string, unknown>)[key]
+        if (
+            value &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            !(value instanceof Uint8Array)
+        ) {
+            return value
+        }
+    }
+    return null
+}
+
+/** Reads the `contextInfo` off a message's first content submessage (null when absent). */
+export function getContextInfo(message: Proto.IMessage): Proto.IContextInfo | null {
+    return pickContextInfoTarget(message)?.contextInfo ?? null
+}
+
+/**
+ * Anything that identifies a quoted message. Accepts a {@link WaQuoteRef}, a
+ * {@link WaMessageKey} (bare proto key), or a full incoming message event (its
+ * `key` + `message` are read). All fields are optional structurally — the
+ * public `quote` option type enforces the concrete shape.
+ */
+type WaQuoteSource = {
+    readonly key?: {
+        readonly id?: string
+        readonly remoteJid?: string
+        readonly participant?: string
+        readonly fromMe?: boolean
+    }
+    readonly id?: string
+    readonly remoteJid?: string
+    readonly participant?: string
+    readonly fromMe?: boolean
+    readonly message?: Proto.IMessage
+}
+
+type WaForwardSource = boolean | { readonly score?: number }
+
+export interface WaSendContextResolveInput {
+    readonly contentLevel?: WaSendContextInfo
+    readonly optionsLevel?: WaSendContextInfo
+    readonly quote?: WaQuoteSource
+    readonly forward?: WaForwardSource
+    readonly mentions?: readonly string[]
+    /**
+     * Chat the message is being sent to. When provided, the quote's
+     * `remoteJid` is emitted only for a cross-chat quote (the quoted message
+     * lives in a different chat), mirroring wa-web's `msgContextInfo`, which
+     * sets `remoteJid` only when `quotedMsg.remote !== targetChat`. Omit it to
+     * keep emitting `remoteJid` unconditionally.
+     */
+    readonly targetJid?: string
+    /**
+     * LID-form self user JID. Used as the DM-quote `participant` fallback when
+     * the quoted message is `fromMe` and no explicit participant was provided.
+     * Mirrors wa-web's `getSender(msg)` (returns `msg.from`, which for 1:1 is
+     * `fromMe ? me : peer`).
+     */
+    readonly meLid?: string
+}
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] }
+
+export function resolveSendContextInfo(input: WaSendContextResolveInput): WaSendContextInfo | null {
+    const ctx: Mutable<WaSendContextInfo> = {
+        ...(input.contentLevel ?? {}),
+        ...(input.optionsLevel ?? {})
+    }
+
+    if (input.quote) {
+        const q = input.quote
+        ctx.quotedMessageId = q.id ?? q.key?.id ?? ctx.quotedMessageId
+        const explicit = q.participant ?? q.key?.participant
+        const quotedRemote = q.remoteJid ?? q.key?.remoteJid
+        const quotedFromMe = q.fromMe ?? q.key?.fromMe
+        const dmFallback =
+            explicit === undefined && quotedRemote && !isGroupOrBroadcastJid(quotedRemote)
+                ? quotedFromMe
+                    ? input.meLid
+                    : quotedRemote
+                : undefined
+        ctx.quotedParticipant = explicit ?? dmFallback ?? ctx.quotedParticipant
+        const crossChat =
+            quotedRemote !== undefined &&
+            (input.targetJid === undefined || !isSameChatJid(quotedRemote, input.targetJid))
+        if (quotedRemote !== undefined) {
+            if (crossChat) {
+                ctx.quotedRemoteJid = quotedRemote
+            } else {
+                delete ctx.quotedRemoteJid
+            }
+        }
+        ctx.quotedMessage = q.message ?? ctx.quotedMessage
+    }
+
+    if (input.forward) {
+        const explicit = typeof input.forward === 'object' ? input.forward.score : undefined
+        const base = ctx.forwardingScore ?? 0
+        ctx.isForwarded = true
+        ctx.forwardingScore = explicit ?? (base > 0 ? base + 1 : 1)
+    }
+
+    if (input.mentions?.length) {
+        ctx.mentionedJids = input.mentions
+    }
+
+    return hasAnyKey(ctx) ? ctx : null
+}
+
+function hasAnyKey(value: object): boolean {
+    for (const _ in value) {
+        return true
+    }
+    return false
+}
+
+function isSameChatJid(a: string, b: string): boolean {
+    return toUserJid(a) === toUserJid(b)
+}

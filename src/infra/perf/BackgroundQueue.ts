@@ -1,0 +1,647 @@
+import { resolvePositive } from '@util/coercion'
+import { toError } from '@util/primitives'
+
+interface QueueWaiter {
+    readonly resolve: () => void
+    readonly reject: (error: Error) => void
+}
+
+interface QueueEntry<V> {
+    value: V
+    waiters: QueueWaiter[]
+    attempt: number
+}
+
+interface RetryTimerEntry<V> {
+    readonly entry: QueueEntry<V>
+    readonly timer: NodeJS.Timeout
+}
+
+interface StateWaiterEntry {
+    done: () => void
+    index: number
+}
+
+export interface BackgroundQueueOptions<K extends string, V> {
+    readonly coalesce?: (previous: V, incoming: V, key: K) => V
+    readonly maxPendingKeys?: number
+    readonly maxWriteConcurrency?: number
+    readonly flushTimeoutMs?: number
+    readonly onError?: (key: K, error: unknown, attempt: number) => void
+    readonly onPressure?: (pendingKeys: number) => void
+    readonly onDiscard?: (key: K, value: V) => void
+    /**
+     * Optional bulk writer. When set, the drain loop coalesces up to
+     * {@link maxBatchSize} pending entries into a single
+     * `batchWriter([...])` call instead of issuing
+     * {@link maxWriteConcurrency} parallel `writer(key, value)` calls.
+     *
+     * Failure semantics: the batch is retried as a unit. The store-side
+     * implementation should be idempotent (upsert) so a partial-success +
+     * retry does not corrupt state.
+     */
+    readonly batchWriter?: (
+        entries: ReadonlyArray<{ readonly key: K; readonly value: V }>
+    ) => Promise<void>
+    /** Max entries per `batchWriter` call. Default 250. Ignored without `batchWriter`. */
+    readonly maxBatchSize?: number
+}
+
+export interface BackgroundQueueFlushResult {
+    readonly flushed: number
+    readonly remaining: number
+}
+
+const DEFAULT_MAX_PENDING_KEYS = 4_096
+const DEFAULT_FLUSH_TIMEOUT_MS = 5_000
+const DEFAULT_MAX_BATCH_SIZE = 250
+const RETRY_BACKOFF_BASE_MS = 100
+const RETRY_BACKOFF_MAX_MS = 2_000
+
+export class BackgroundQueue<K extends string, V> {
+    private readonly writer: (key: K, value: V) => Promise<void>
+    private readonly batchWriter:
+        | ((entries: ReadonlyArray<{ readonly key: K; readonly value: V }>) => Promise<void>)
+        | null
+    private readonly maxBatchSize: number
+    private readonly coalesce: (previous: V, incoming: V, key: K) => V
+    private readonly maxPendingKeys: number
+    private readonly maxWriteConcurrency: number
+    private readonly flushTimeoutMs: number
+    private readonly onError?: (key: K, error: unknown, attempt: number) => void
+    private readonly onPressure?: (pendingKeys: number) => void
+    private readonly onDiscard?: (key: K, value: V) => void
+    private readonly pendingByKey: Map<K, QueueEntry<V>>
+    private readonly retryTimersByKey: Map<K, RetryTimerEntry<V>>
+    private readonly stateWaiters: StateWaiterEntry[]
+    private drainingPromise: Promise<void> | null
+    private inFlight: number
+    private flushedCount: number
+    private shutdownRequested: boolean
+    private retryDisabled: boolean
+
+    public constructor(
+        writer: (key: K, value: V) => Promise<void>,
+        options: BackgroundQueueOptions<K, V> = {}
+    ) {
+        this.writer = writer
+        this.coalesce = options.coalesce ?? ((_p, i) => i)
+        this.maxPendingKeys = resolvePositive(
+            options.maxPendingKeys,
+            DEFAULT_MAX_PENDING_KEYS,
+            'maxPendingKeys'
+        )
+        this.maxWriteConcurrency = resolvePositive(
+            options.maxWriteConcurrency,
+            1,
+            'maxWriteConcurrency'
+        )
+        this.batchWriter = options.batchWriter ?? null
+        this.maxBatchSize = this.batchWriter
+            ? resolvePositive(options.maxBatchSize, DEFAULT_MAX_BATCH_SIZE, 'maxBatchSize')
+            : DEFAULT_MAX_BATCH_SIZE
+        const flushTimeoutMs = options.flushTimeoutMs ?? DEFAULT_FLUSH_TIMEOUT_MS
+        if (!Number.isFinite(flushTimeoutMs) || flushTimeoutMs < 1) {
+            throw new Error('BackgroundQueue flushTimeoutMs must be a positive finite number')
+        }
+        this.flushTimeoutMs = flushTimeoutMs
+        this.onError = options.onError
+        this.onPressure = options.onPressure
+        this.onDiscard = options.onDiscard
+        this.pendingByKey = new Map()
+        this.retryTimersByKey = new Map()
+        this.stateWaiters = []
+        this.drainingPromise = null
+        this.inFlight = 0
+        this.flushedCount = 0
+        this.shutdownRequested = false
+        this.retryDisabled = false
+    }
+
+    public enqueue(key: K, value: V): void {
+        if (this.shutdownRequested) {
+            this.invokeOnDiscard(key, value)
+            return
+        }
+        if (this.pendingByKey.has(key) || this.retryTimersByKey.has(key)) {
+            this.addPendingEntry(key, value)
+            this.notifyStateChange()
+            this.ensureDrain()
+            return
+        }
+        if (this.trackedKeys() < this.maxPendingKeys) {
+            this.addPendingEntry(key, value)
+            this.notifyStateChange()
+            this.ensureDrain()
+            return
+        }
+        this.invokeOnPressure(this.trackedKeys())
+        this.invokeOnDiscard(key, value)
+    }
+
+    public async enqueueAsync(key: K, value: V): Promise<void> {
+        if (this.shutdownRequested) {
+            this.invokeOnDiscard(key, value)
+            throw new Error('background queue is destroyed')
+        }
+
+        await this.waitForCapacity(key, value)
+
+        return new Promise<void>((resolve, reject) => {
+            const waiter: QueueWaiter = { resolve, reject }
+            this.addPendingEntry(key, value, waiter)
+            this.notifyStateChange()
+            this.ensureDrain()
+        })
+    }
+
+    private async waitForCapacity(key: K, value: V): Promise<void> {
+        while (
+            !this.pendingByKey.has(key) &&
+            !this.retryTimersByKey.has(key) &&
+            this.trackedKeys() >= this.maxPendingKeys
+        ) {
+            this.invokeOnPressure(this.trackedKeys())
+            await this.waitForStateChange(this.flushTimeoutMs)
+            if (this.shutdownRequested) {
+                this.invokeOnDiscard(key, value)
+                throw new Error('background queue is destroyed')
+            }
+        }
+    }
+
+    private addPendingEntry(key: K, value: V, waiter?: QueueWaiter): void {
+        const scheduledRetryTimer = this.retryTimersByKey.get(key) ?? null
+        const scheduledRetry = scheduledRetryTimer?.entry ?? null
+        const existing = this.pendingByKey.get(key)
+        if (existing) {
+            let coalescedValue = existing.value
+            let coalescedAttempt = existing.attempt
+            try {
+                if (scheduledRetry) {
+                    coalescedValue = this.coalesce(scheduledRetry.value, coalescedValue, key)
+                    coalescedAttempt = Math.max(coalescedAttempt, scheduledRetry.attempt)
+                }
+                coalescedValue = this.coalesce(coalescedValue, value, key)
+            } catch (error) {
+                this.invokeOnError(
+                    key,
+                    error,
+                    Math.max(coalescedAttempt + 1, scheduledRetry?.attempt ?? 0)
+                )
+                if (waiter) {
+                    waiter.reject(
+                        error === undefined
+                            ? new Error('background queue coalesce failed')
+                            : toError(error)
+                    )
+                } else {
+                    this.invokeOnDiscard(key, value)
+                }
+                return
+            }
+            if (scheduledRetry) {
+                this.detachRetryEntry(key, scheduledRetryTimer)
+                if (scheduledRetry.waiters.length > 0) {
+                    const mergedWaiters = new Array<QueueWaiter>(
+                        scheduledRetry.waiters.length + existing.waiters.length
+                    )
+                    let writeIndex = 0
+                    for (let i = 0; i < scheduledRetry.waiters.length; i += 1) {
+                        mergedWaiters[writeIndex++] = scheduledRetry.waiters[i]
+                    }
+                    for (let i = 0; i < existing.waiters.length; i += 1) {
+                        mergedWaiters[writeIndex++] = existing.waiters[i]
+                    }
+                    existing.waiters = mergedWaiters
+                }
+                existing.attempt = Math.max(coalescedAttempt, scheduledRetry.attempt)
+            }
+            existing.value = coalescedValue
+            existing.attempt = coalescedAttempt
+            if (waiter) {
+                existing.waiters[existing.waiters.length] = waiter
+            }
+            return
+        }
+        if (scheduledRetry) {
+            let coalescedValue: V
+            try {
+                coalescedValue = this.coalesce(scheduledRetry.value, value, key)
+            } catch (error) {
+                this.invokeOnError(key, error, scheduledRetry.attempt + 1)
+                if (waiter) {
+                    waiter.reject(
+                        error === undefined
+                            ? new Error('background queue coalesce failed')
+                            : toError(error)
+                    )
+                } else {
+                    this.invokeOnDiscard(key, value)
+                }
+                return
+            }
+            this.detachRetryEntry(key, scheduledRetryTimer)
+            const scheduledWaiterCount = scheduledRetry.waiters.length
+            const waiters = new Array<QueueWaiter>(scheduledWaiterCount + (waiter ? 1 : 0))
+            for (let i = 0; i < scheduledWaiterCount; i += 1) {
+                waiters[i] = scheduledRetry.waiters[i]
+            }
+            if (waiter) {
+                waiters[scheduledWaiterCount] = waiter
+            }
+            this.pendingByKey.set(key, {
+                value: coalescedValue,
+                waiters,
+                attempt: scheduledRetry.attempt
+            })
+            return
+        }
+        this.pendingByKey.set(key, {
+            value,
+            waiters: waiter ? [waiter] : [],
+            attempt: 0
+        })
+    }
+
+    private detachRetryEntry(key: K, retry: RetryTimerEntry<V> | null): void {
+        if (!retry) {
+            return
+        }
+        const current = this.retryTimersByKey.get(key)
+        if (!current || current !== retry) {
+            return
+        }
+        this.retryTimersByKey.delete(key)
+        clearTimeout(retry.timer)
+    }
+
+    public async flush(
+        timeoutMs: number = this.flushTimeoutMs
+    ): Promise<BackgroundQueueFlushResult> {
+        const normalizedTimeoutMs = Math.max(
+            0,
+            Number.isFinite(timeoutMs) ? timeoutMs : this.flushTimeoutMs
+        )
+        const startFlushed = this.flushedCount
+        const deadline = Date.now() + normalizedTimeoutMs
+        while (true) {
+            const remaining = this.remaining()
+            if (remaining === 0) {
+                return {
+                    flushed: this.flushedCount - startFlushed,
+                    remaining: 0
+                }
+            }
+            const remainingMs = deadline - Date.now()
+            if (remainingMs <= 0) {
+                return {
+                    flushed: this.flushedCount - startFlushed,
+                    remaining
+                }
+            }
+            await this.waitForStateChange(remainingMs, true)
+        }
+    }
+
+    public async destroy(
+        timeoutMs: number = this.flushTimeoutMs
+    ): Promise<BackgroundQueueFlushResult> {
+        const normalizedTimeoutMs = Math.max(
+            0,
+            Number.isFinite(timeoutMs) ? timeoutMs : this.flushTimeoutMs
+        )
+        this.shutdownRequested = true
+        this.notifyStateChange()
+        const flushed = await this.flush(normalizedTimeoutMs)
+        if (flushed.remaining > 0) {
+            this.retryDisabled = true
+            this.discardPending()
+        }
+        return {
+            flushed: flushed.flushed,
+            remaining: this.remaining()
+        }
+    }
+
+    private ensureDrain(): void {
+        if (this.drainingPromise) {
+            return
+        }
+        this.drainingPromise = this.drainLoop().finally(() => {
+            this.drainingPromise = null
+            this.notifyStateChange()
+            if (this.pendingByKey.size > 0) {
+                this.ensureDrain()
+            }
+        })
+    }
+
+    private async drainLoop(): Promise<void> {
+        while (true) {
+            if (this.batchWriter) {
+                const batch = this.takeBatch(this.maxBatchSize)
+                if (batch.length === 0) {
+                    return
+                }
+                await this.processBatch(batch)
+                continue
+            }
+            const batch = this.takeBatch(this.maxWriteConcurrency)
+            if (batch.length === 0) {
+                return
+            }
+            if (batch.length === 1) {
+                await this.processEntry(batch[0].key, batch[0].entry)
+                continue
+            }
+            const tasks = new Array<Promise<void>>(batch.length)
+            for (let i = 0; i < batch.length; i += 1) {
+                tasks[i] = this.processEntry(batch[i].key, batch[i].entry)
+            }
+            await Promise.all(tasks)
+        }
+    }
+
+    private takeBatch(limit: number): { readonly key: K; readonly entry: QueueEntry<V> }[] {
+        const batch: { readonly key: K; readonly entry: QueueEntry<V> }[] = []
+        for (let i = 0; i < limit; i += 1) {
+            const next = this.takeNext()
+            if (!next) {
+                break
+            }
+            batch.push(next)
+        }
+        return batch
+    }
+
+    private async processBatch(
+        batch: ReadonlyArray<{ readonly key: K; readonly entry: QueueEntry<V> }>
+    ): Promise<void> {
+        const batchWriter = this.batchWriter
+        if (!batchWriter) {
+            throw new Error('processBatch called without batchWriter')
+        }
+        this.inFlight += batch.length
+        const payload = new Array<{ key: K; value: V }>(batch.length)
+        for (let i = 0; i < batch.length; i += 1) {
+            payload[i] = { key: batch[i].key, value: batch[i].entry.value }
+        }
+        try {
+            await batchWriter(payload)
+            this.flushedCount += batch.length
+            for (const item of batch) {
+                this.resolveEntry(item.entry)
+            }
+        } catch (error) {
+            for (const item of batch) {
+                if (this.retryDisabled) {
+                    this.discardEntry(item.key, item.entry)
+                } else {
+                    const merged = this.mergeForRetry(item.key, item.entry)
+                    const attempt = merged.attempt + 1
+                    merged.attempt = attempt
+                    this.invokeOnError(item.key, error, attempt)
+                    this.scheduleRetry(item.key, merged, this.retryDelayMs(attempt))
+                }
+            }
+        } finally {
+            this.inFlight -= batch.length
+            this.notifyStateChange()
+        }
+    }
+
+    private async processEntry(key: K, entry: QueueEntry<V>): Promise<void> {
+        this.inFlight += 1
+        try {
+            await this.writer(key, entry.value)
+            this.flushedCount += 1
+            this.resolveEntry(entry)
+        } catch (error) {
+            if (this.retryDisabled) {
+                this.discardEntry(key, entry)
+            } else {
+                const merged = this.mergeForRetry(key, entry)
+                const attempt = merged.attempt + 1
+                merged.attempt = attempt
+                this.invokeOnError(key, error, attempt)
+                this.scheduleRetry(key, merged, this.retryDelayMs(attempt))
+            }
+        } finally {
+            this.inFlight -= 1
+            this.notifyStateChange()
+        }
+    }
+
+    private takeNext(): { readonly key: K; readonly entry: QueueEntry<V> } | null {
+        const next = this.pendingByKey.entries().next().value
+        if (!next) {
+            return null
+        }
+        const [key, entry] = next
+        this.pendingByKey.delete(key)
+        return { key, entry }
+    }
+
+    private mergeForRetry(key: K, failedEntry: QueueEntry<V>): QueueEntry<V> {
+        const pending = this.pendingByKey.get(key)
+        if (!pending) {
+            return failedEntry
+        }
+        const mergedWaiters = new Array<QueueWaiter>(
+            failedEntry.waiters.length + pending.waiters.length
+        )
+        let mergedIndex = 0
+        for (let i = 0; i < failedEntry.waiters.length; i += 1) {
+            mergedWaiters[mergedIndex++] = failedEntry.waiters[i]
+        }
+        for (let i = 0; i < pending.waiters.length; i += 1) {
+            mergedWaiters[mergedIndex++] = pending.waiters[i]
+        }
+        let mergedValue: V
+        try {
+            mergedValue = this.coalesce(failedEntry.value, pending.value, key)
+        } catch (error) {
+            const fallbackAttempt = Math.max(failedEntry.attempt, pending.attempt)
+            this.invokeOnError(key, error, fallbackAttempt + 1)
+            this.pendingByKey.delete(key)
+            this.invokeOnDiscard(key, pending.value)
+            if (pending.waiters.length > 0) {
+                const queueError =
+                    error === undefined
+                        ? new Error('background queue coalesce failed')
+                        : toError(error)
+                for (let index = 0; index < pending.waiters.length; index += 1) {
+                    pending.waiters[index].reject(queueError)
+                }
+            }
+            return failedEntry
+        }
+        this.pendingByKey.delete(key)
+        return {
+            value: mergedValue,
+            waiters: mergedWaiters,
+            attempt: Math.max(failedEntry.attempt, pending.attempt)
+        }
+    }
+
+    private retryDelayMs(attempt: number): number {
+        if (attempt <= 1) {
+            return RETRY_BACKOFF_BASE_MS
+        }
+        const unbounded = RETRY_BACKOFF_BASE_MS * 2 ** Math.min(6, attempt - 1)
+        return Math.min(RETRY_BACKOFF_MAX_MS, unbounded)
+    }
+
+    private scheduleRetry(key: K, entry: QueueEntry<V>, retryMs: number): void {
+        const existing = this.retryTimersByKey.get(key)
+        if (existing) {
+            clearTimeout(existing.timer)
+        }
+        const timer = setTimeout(() => {
+            this.retryTimersByKey.delete(key)
+            if (this.retryDisabled) {
+                this.discardEntry(key, entry)
+                this.notifyStateChange()
+                return
+            }
+            const latest = this.mergeForRetry(key, entry)
+            this.pendingByKey.set(key, latest)
+            this.notifyStateChange()
+            this.ensureDrain()
+        }, retryMs)
+        timer.unref?.()
+        this.retryTimersByKey.set(key, { entry, timer })
+        this.notifyStateChange()
+    }
+
+    private resolveEntry(entry: QueueEntry<V>): void {
+        if (entry.waiters.length === 0) {
+            return
+        }
+        for (const waiter of entry.waiters) {
+            waiter.resolve()
+        }
+    }
+
+    private discardEntry(key: K, entry: QueueEntry<V>): void {
+        this.invokeOnDiscard(key, entry.value)
+        if (entry.waiters.length === 0) {
+            return
+        }
+        const error = toError('background queue destroyed before write was flushed')
+        for (const waiter of entry.waiters) {
+            waiter.reject(error)
+        }
+    }
+
+    private discardPending(): void {
+        if (this.pendingByKey.size > 0) {
+            for (const [key, entry] of this.pendingByKey) {
+                this.pendingByKey.delete(key)
+                this.discardEntry(key, entry)
+            }
+        }
+        if (this.retryTimersByKey.size > 0) {
+            for (const [key, retry] of this.retryTimersByKey) {
+                this.retryTimersByKey.delete(key)
+                clearTimeout(retry.timer)
+                this.discardEntry(key, retry.entry)
+            }
+        }
+        this.notifyStateChange()
+    }
+
+    private remaining(): number {
+        return this.pendingByKey.size + this.retryTimersByKey.size + this.inFlight
+    }
+
+    private trackedKeys(): number {
+        return this.pendingByKey.size + this.retryTimersByKey.size
+    }
+
+    private notifyStateChange(): void {
+        if (this.stateWaiters.length === 0) {
+            return
+        }
+        const waiterCount = this.stateWaiters.length
+        for (let index = 0; index < waiterCount; index += 1) {
+            const waiter = this.stateWaiters[index]
+            waiter.index = -1
+            waiter.done()
+        }
+        this.stateWaiters.length = 0
+    }
+
+    private waitForStateChange(timeoutMs: number, ref = false): Promise<void> {
+        return new Promise<void>((resolve) => {
+            let active = true
+            const waiter: StateWaiterEntry = {
+                done: () => {
+                    if (!active) {
+                        return
+                    }
+                    active = false
+                    clearTimeout(timer)
+                    this.removeStateWaiter(waiter)
+                    resolve()
+                },
+                index: -1
+            }
+            const timer = setTimeout(waiter.done, timeoutMs)
+            if (!ref) {
+                timer.unref?.()
+            }
+            waiter.index = this.stateWaiters.length
+            this.stateWaiters[waiter.index] = waiter
+        })
+    }
+
+    private removeStateWaiter(waiter: StateWaiterEntry): void {
+        const index = waiter.index
+        if (index < 0) {
+            return
+        }
+        const lastIndex = this.stateWaiters.length - 1
+        if (index !== lastIndex) {
+            const last = this.stateWaiters[lastIndex]
+            this.stateWaiters[index] = last
+            last.index = index
+        }
+        this.stateWaiters.length = lastIndex
+        waiter.index = -1
+    }
+
+    private invokeOnError(key: K, error: unknown, attempt: number): void {
+        if (!this.onError) {
+            return
+        }
+        try {
+            this.onError(key, error, attempt)
+        } catch {
+            return
+        }
+    }
+
+    private invokeOnPressure(pendingKeys: number): void {
+        if (!this.onPressure) {
+            return
+        }
+        try {
+            this.onPressure(pendingKeys)
+        } catch {
+            return
+        }
+    }
+
+    private invokeOnDiscard(key: K, value: V): void {
+        if (!this.onDiscard) {
+            return
+        }
+        try {
+            this.onDiscard(key, value)
+        } catch {
+            return
+        }
+    }
+}

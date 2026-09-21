@@ -1,0 +1,28 @@
+name: github-release
+
+on:
+    push:
+        tags:
+            - 'v*'
+
+permissions:
+    contents: write
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+
+        steps:
+            - name: checkout repository
+              uses: actions/checkout@v4
+
+            - name: create github release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+                    gh release create "${GITHUB_REF_NAME}" --generate-notes --prerelease
+                  else
+                    gh release create "${GITHUB_REF_NAME}" --generate-notes
+                  fi

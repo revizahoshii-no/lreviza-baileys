@@ -1,0 +1,2168 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+    WA_BUSINESS_HOURS_MODES,
+    WA_DEFAULTS,
+    WA_EMAIL_CONTEXTS,
+    WA_EMAIL_TAGS,
+    WA_EMAIL_XMLNS,
+    WA_MESSAGE_TAGS,
+    WA_NODE_TAGS,
+    WA_PRIVACY_CATEGORIES,
+    WA_PRIVACY_TAGS,
+    WA_PRIVACY_TOKEN_TAGS,
+    WA_PRIVACY_TOKEN_TYPES,
+    WA_USYNC_CONTEXTS,
+    WA_USYNC_MODES,
+    WA_XMLNS
+} from '@protocol/constants'
+import {
+    buildAccountBlocklistSyncIq,
+    buildAccountDevicesSyncIq,
+    buildAccountPictureSyncIq,
+    buildClearDirtyBitsIq,
+    buildListParticipatingGroupsIq,
+    buildNewsletterMetadataSyncIq
+} from '@transport/node/builders/account-sync'
+import { buildBotListIq } from '@transport/node/builders/bot'
+import { buildEditBusinessProfileIq } from '@transport/node/builders/business'
+import { buildChatstateNode } from '@transport/node/builders/chatstate'
+import {
+    buildDeactivateCommunityIq,
+    buildLinkedGroupsParticipantsIq,
+    buildLinkSubGroupsIq,
+    buildUnlinkSubGroupsIq
+} from '@transport/node/builders/community'
+import { buildRemoveCompanionDeviceIq } from '@transport/node/builders/device'
+import {
+    buildConfirmEmailIq,
+    buildGetEmailIq,
+    buildRequestEmailVerificationCodeIq,
+    buildSetEmailIq,
+    buildVerifyEmailCodeIq
+} from '@transport/node/builders/email'
+import { buildAckNode, buildIqResultNode, buildReceiptNode } from '@transport/node/builders/global'
+import {
+    buildCancelMembershipRequestsIq,
+    buildCreateGroupIq,
+    buildGetMembershipApprovalRequestsIq,
+    buildGroupParticipantChangeIq,
+    buildJoinLinkedGroupIq,
+    buildLeaveGroupIq,
+    buildMembershipRequestsActionIq,
+    buildSetGroupEphemeralIq,
+    buildSetGroupMemberAddModeIq,
+    buildSetGroupMemberLinkModeIq,
+    buildSetGroupMemberShareGroupHistoryModeIq
+} from '@transport/node/builders/group'
+import {
+    buildButtonAddonNode,
+    buildDirectMessageFanoutNode,
+    buildGroupRetryMessageNode,
+    buildGroupSenderKeyMessageNode,
+    buildMetaNode
+} from '@transport/node/builders/message'
+import { buildOfflineBatchNode } from '@transport/node/builders/offline'
+import {
+    buildCompanionFinishRequestNode,
+    buildCompanionHelloRequestNode,
+    buildGetCountryCodeRequestNode
+} from '@transport/node/builders/pairing'
+import {
+    buildMissingPreKeysFetchIq,
+    buildPreKeyUploadIq,
+    buildSignedPreKeyRotateIq
+} from '@transport/node/builders/prekeys'
+import { buildPresenceNode, buildPresenceSubscribeNode } from '@transport/node/builders/presence'
+import {
+    buildBlocklistBlockIq,
+    buildBlocklistUnblockIq,
+    buildGetBlocklistIq,
+    buildGetPrivacyDisallowedListIq,
+    buildGetPrivacySettingsIq,
+    buildSetPrivacyCategoryIq,
+    buildSetPrivacyDisallowedListIq
+} from '@transport/node/builders/privacy'
+import {
+    buildCsTokenMessageNode,
+    buildPrivacyTokenIqNode,
+    buildTcTokenMessageNode
+} from '@transport/node/builders/privacy-token'
+import {
+    buildSetDisappearingModeIq,
+    buildUsernameLookupContactNode,
+    buildUsernameLookupUsyncQueryNodes
+} from '@transport/node/builders/profile'
+import { buildRetryReceiptNode } from '@transport/node/builders/retry'
+import {
+    buildUsyncIq,
+    buildUsyncUserNode,
+    parseUsyncResultEnvelope
+} from '@transport/node/builders/usync'
+import { findNodeChild } from '@transport/node/helpers'
+import type { BinaryNode } from '@transport/types'
+
+test('presence and offline builders generate expected lightweight nodes', () => {
+    const presence = buildPresenceNode({
+        type: 'unavailable',
+        name: 'Vinicius'
+    })
+    assert.deepEqual(presence, {
+        tag: 'presence',
+        attrs: {
+            type: 'unavailable',
+            name: 'Vinicius'
+        }
+    })
+
+    const offlineBatch = buildOfflineBatchNode(200)
+    assert.equal(offlineBatch.tag, WA_NODE_TAGS.INFO_BULLETIN)
+    assert.ok(Array.isArray(offlineBatch.content))
+    if (!Array.isArray(offlineBatch.content)) {
+        throw new Error('expected offline batch content array')
+    }
+    assert.deepEqual(offlineBatch.content[0], {
+        tag: 'offline_batch',
+        attrs: { count: '200' },
+        content: undefined
+    })
+})
+
+test('chatstate builder composes composing/paused with optional media and rejects unsupported jids', () => {
+    const composing = buildChatstateNode({
+        jid: '5511999999999@s.whatsapp.net',
+        state: 'composing'
+    })
+    assert.deepEqual(composing, {
+        tag: 'chatstate',
+        attrs: { to: '5511999999999@s.whatsapp.net' },
+        content: [{ tag: 'composing', attrs: {} }]
+    })
+
+    const recording = buildChatstateNode({
+        jid: '5511999999999@s.whatsapp.net',
+        state: 'composing',
+        media: 'audio'
+    })
+    assert.deepEqual(recording.content, [{ tag: 'composing', attrs: { media: 'audio' } }])
+
+    const paused = buildChatstateNode({ jid: 'group@g.us', state: 'paused' })
+    assert.deepEqual(paused.content, [{ tag: 'paused', attrs: {} }])
+
+    assert.throws(() => buildChatstateNode({ jid: '12345@newsletter', state: 'composing' }))
+    assert.throws(() => buildChatstateNode({ jid: '12345@broadcast', state: 'composing' }))
+    assert.throws(() => buildChatstateNode({ jid: 'group@g.us', state: 'paused', media: 'audio' }))
+})
+
+test('presence subscribe builder emits subscribe stanza with optional name/context', () => {
+    const subscribe = buildPresenceSubscribeNode({ jid: '5511999999999@s.whatsapp.net' })
+    assert.deepEqual(subscribe, {
+        tag: 'presence',
+        attrs: { type: 'subscribe', to: '5511999999999@s.whatsapp.net' }
+    })
+
+    const subscribeWithExtras = buildPresenceSubscribeNode({
+        jid: '5511999999999@s.whatsapp.net',
+        name: 'Vinicius',
+        context: 'group@g.us'
+    })
+    assert.deepEqual(subscribeWithExtras.attrs, {
+        type: 'subscribe',
+        to: '5511999999999@s.whatsapp.net',
+        name: 'Vinicius',
+        context: 'group@g.us'
+    })
+
+    assert.throws(() => buildPresenceSubscribeNode({ jid: '12345@newsletter' }))
+})
+
+test('usync builder composes query/list nodes with defaults and overrides', () => {
+    const customUserNode = buildUsyncUserNode({
+        jid: '5511888888888@s.whatsapp.net',
+        attrs: {
+            pn_jid: '5511888888888@s.whatsapp.net'
+        },
+        content: [
+            {
+                tag: 'contact',
+                attrs: {}
+            }
+        ]
+    })
+    const iq = buildUsyncIq({
+        sid: 'sid-2',
+        mode: WA_USYNC_MODES.QUERY,
+        context: WA_USYNC_CONTEXTS.INTERACTIVE,
+        queryProtocolNodes: [
+            {
+                tag: WA_NODE_TAGS.DEVICES,
+                attrs: {
+                    version: '2'
+                }
+            }
+        ],
+        users: [
+            {
+                jid: '5511999999999@s.whatsapp.net'
+            },
+            {
+                jid: customUserNode.attrs.jid,
+                attrs: {
+                    pn_jid: customUserNode.attrs.pn_jid
+                },
+                content: customUserNode.content
+            }
+        ]
+    })
+
+    assert.equal(iq.attrs.type, 'get')
+    assert.equal(iq.attrs.xmlns, 'usync')
+    assert.equal(iq.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.ok(Array.isArray(iq.content))
+    const usyncNode = iq.content[0]
+    assert.equal(usyncNode.tag, WA_NODE_TAGS.USYNC)
+    assert.equal(usyncNode.attrs.sid, 'sid-2')
+    assert.equal(usyncNode.attrs.index, '0')
+    assert.equal(usyncNode.attrs.last, 'true')
+    assert.equal(usyncNode.attrs.mode, WA_USYNC_MODES.QUERY)
+    assert.equal(usyncNode.attrs.context, WA_USYNC_CONTEXTS.INTERACTIVE)
+    assert.ok(Array.isArray(usyncNode.content))
+
+    const queryNode = usyncNode.content.find(
+        (child: BinaryNode) => child.tag === WA_NODE_TAGS.QUERY
+    )
+    assert.ok(queryNode)
+    assert.ok(Array.isArray(queryNode.content))
+    assert.equal(queryNode.content[0].tag, WA_NODE_TAGS.DEVICES)
+    assert.equal(queryNode.content[0].attrs.version, '2')
+
+    const listNode = usyncNode.content.find((child: BinaryNode) => child.tag === WA_NODE_TAGS.LIST)
+    assert.ok(listNode)
+    assert.ok(Array.isArray(listNode.content))
+    assert.equal(listNode.content.length, 2)
+    assert.equal(listNode.content[1].attrs.pn_jid, '5511888888888@s.whatsapp.net')
+    assert.ok(Array.isArray(listNode.content[1].content))
+    assert.equal(listNode.content[1].content[0].tag, 'contact')
+
+    assert.throws(
+        () =>
+            buildUsyncIq({
+                sid: 'invalid',
+                queryProtocolNodes: [],
+                users: []
+            }),
+        /must include at least one protocol node/
+    )
+})
+
+test('parseUsyncResultEnvelope extracts per-protocol errors with backoff', () => {
+    const response: BinaryNode = {
+        tag: 'iq',
+        attrs: { type: 'result' },
+        content: [
+            {
+                tag: 'usync',
+                attrs: {},
+                content: [
+                    {
+                        tag: 'result',
+                        attrs: {},
+                        content: [
+                            {
+                                tag: 'bot',
+                                attrs: {},
+                                content: [
+                                    {
+                                        tag: 'error',
+                                        attrs: {
+                                            code: '400',
+                                            text: 'bad-request',
+                                            backoff: '598'
+                                        }
+                                    }
+                                ]
+                            },
+                            { tag: 'contact', attrs: { refresh: '3600' } },
+                            { tag: 'status', attrs: {} }
+                        ]
+                    },
+                    { tag: 'list', attrs: {} }
+                ]
+            }
+        ]
+    }
+
+    const envelope = parseUsyncResultEnvelope(response)
+    assert.deepEqual(envelope.errors, {
+        bot: { code: 400, text: 'bad-request', backoffSeconds: 598 }
+    })
+    assert.deepEqual(envelope.refresh, { contact: 3600 })
+})
+
+test('parseUsyncResultEnvelope returns empty envelope when usync or result missing', () => {
+    const noUsync: BinaryNode = { tag: 'iq', attrs: { type: 'result' } }
+    assert.deepEqual(parseUsyncResultEnvelope(noUsync), { errors: {}, refresh: {} })
+
+    const noResult: BinaryNode = {
+        tag: 'iq',
+        attrs: { type: 'result' },
+        content: [{ tag: 'usync', attrs: {} }]
+    }
+    assert.deepEqual(parseUsyncResultEnvelope(noResult), { errors: {}, refresh: {} })
+})
+
+test('parseUsyncResultEnvelope falls back to null fields when error attrs missing', () => {
+    const response: BinaryNode = {
+        tag: 'iq',
+        attrs: { type: 'result' },
+        content: [
+            {
+                tag: 'usync',
+                attrs: {},
+                content: [
+                    {
+                        tag: 'result',
+                        attrs: {},
+                        content: [
+                            {
+                                tag: 'feature',
+                                attrs: {},
+                                content: [{ tag: 'error', attrs: {} }]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+    const envelope = parseUsyncResultEnvelope(response)
+    assert.deepEqual(envelope.errors, {
+        feature: { code: null, text: null, backoffSeconds: null }
+    })
+    assert.deepEqual(envelope.refresh, {})
+})
+
+test('account sync builders generate expected iq structure', () => {
+    const devices = buildAccountDevicesSyncIq(
+        ['5511999999999@s.whatsapp.net', '5511888888888@s.whatsapp.net'],
+        'sid-1'
+    )
+    assert.equal(devices.attrs.type, 'get')
+    assert.equal(devices.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.ok(Array.isArray(devices.content))
+    const usync = devices.content[0]
+    assert.equal(usync.tag, WA_NODE_TAGS.USYNC)
+    assert.equal(usync.attrs.sid, 'sid-1')
+    assert.ok(Array.isArray(usync.content))
+    const listNode = usync.content.find((child: BinaryNode) => child.tag === WA_NODE_TAGS.LIST)
+    assert.ok(listNode)
+    assert.ok(Array.isArray(listNode.content))
+    assert.equal(listNode.content.length, 2)
+
+    const picture = buildAccountPictureSyncIq('5511999999999@s.whatsapp.net')
+    assert.equal(picture.attrs.type, 'get')
+    assert.equal(picture.attrs.target, '5511999999999@s.whatsapp.net')
+
+    const blocklist = buildAccountBlocklistSyncIq()
+    assert.equal(blocklist.attrs.type, 'get')
+    assert.equal(blocklist.content, undefined)
+
+    const groupsList = buildListParticipatingGroupsIq()
+    assert.equal(groupsList.attrs.type, 'get')
+    assert.ok(Array.isArray(groupsList.content))
+    const participating = groupsList.content[0]
+    assert.equal(participating.tag, WA_NODE_TAGS.PARTICIPATING)
+    assert.ok(Array.isArray(participating.content))
+    assert.equal(participating.content.length, 2)
+
+    const newsletter = buildNewsletterMetadataSyncIq()
+    assert.equal(newsletter.attrs.type, 'get')
+    assert.ok(Array.isArray(newsletter.content))
+    assert.equal(newsletter.content[0].tag, WA_NODE_TAGS.MY_ADDONS)
+
+    const clearDirty = buildClearDirtyBitsIq([
+        { type: 'groups', timestamp: 11 },
+        { type: 'account_sync', timestamp: 22 }
+    ])
+    assert.equal(clearDirty.attrs.type, 'set')
+    assert.ok(Array.isArray(clearDirty.content))
+    assert.equal(clearDirty.content[0].attrs.type, 'groups')
+    assert.equal(clearDirty.content[1].attrs.timestamp, '22')
+})
+
+test('device builder produces remove-companion-device IQ', () => {
+    const iq = buildRemoveCompanionDeviceIq('5511999999999:3@s.whatsapp.net', 'user_initiated')
+    assert.equal(iq.attrs.type, 'set')
+    assert.equal(iq.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal(iq.attrs.xmlns, WA_XMLNS.MD)
+    assert.ok(Array.isArray(iq.content))
+    const child = iq.content[0]
+    assert.equal(child.tag, 'remove-companion-device')
+    assert.equal(child.attrs.jid, '5511999999999:3@s.whatsapp.net')
+    assert.equal(child.attrs.reason, 'user_initiated')
+})
+
+test('group builders support create participant updates and leave', () => {
+    const withDescription = buildCreateGroupIq({
+        subject: 'new group',
+        participants: ['5511999999999@s.whatsapp.net'],
+        description: 'hello'
+    })
+    assert.equal(withDescription.attrs.type, 'set')
+    assert.ok(Array.isArray(withDescription.content))
+    const createWithDescription = withDescription.content[0]
+    assert.equal(createWithDescription.tag, 'create')
+    assert.ok(Array.isArray(createWithDescription.content))
+    assert.ok(
+        createWithDescription.content.some((entry: BinaryNode) => entry.tag === 'description')
+    )
+
+    const withoutDescription = buildCreateGroupIq({
+        subject: 'no description',
+        participants: ['5511888888888@s.whatsapp.net']
+    })
+    assert.ok(Array.isArray(withoutDescription.content))
+    const createWithoutDescription = withoutDescription.content[0]
+    assert.ok(Array.isArray(createWithoutDescription.content))
+    assert.equal(
+        createWithoutDescription.content.some((entry: BinaryNode) => entry.tag === 'description'),
+        false
+    )
+
+    const participantChange = buildGroupParticipantChangeIq({
+        groupJid: '1234@g.us',
+        action: 'remove',
+        participants: ['5511777777777@s.whatsapp.net', '5511666666666@s.whatsapp.net']
+    })
+    assert.equal(participantChange.attrs.to, '1234@g.us')
+    assert.ok(Array.isArray(participantChange.content))
+    const remove = participantChange.content[0]
+    assert.equal(remove.tag, 'remove')
+    assert.ok(Array.isArray(remove.content))
+    assert.equal(remove.content.length, 2)
+
+    const leave = buildLeaveGroupIq(['1@g.us', '2@g.us'])
+    assert.equal(leave.attrs.type, 'set')
+    assert.ok(Array.isArray(leave.content))
+    assert.equal(leave.content[0].tag, 'leave')
+})
+
+test('buildSetGroupMemberAddModeIq shapes IQ with mode as text content', () => {
+    const adminAdd = buildSetGroupMemberAddModeIq({
+        groupJid: '120363@g.us',
+        mode: 'admin_add'
+    })
+    assert.equal(adminAdd.attrs.type, 'set')
+    assert.equal(adminAdd.attrs.to, '120363@g.us')
+    assert.equal(adminAdd.attrs.xmlns, WA_XMLNS.GROUPS)
+    const adminAddChild = (adminAdd.content as readonly BinaryNode[])[0]
+    assert.equal(adminAddChild.tag, 'member_add_mode')
+    assert.equal(adminAddChild.content, 'admin_add')
+
+    const allMember = buildSetGroupMemberAddModeIq({
+        groupJid: '120363@g.us',
+        mode: 'all_member_add'
+    })
+    const allMemberChild = (allMember.content as readonly BinaryNode[])[0]
+    assert.equal(allMemberChild.content, 'all_member_add')
+})
+
+test('buildSetGroupMemberLinkModeIq and ShareGroupHistoryMode shape mode IQs', () => {
+    const link = buildSetGroupMemberLinkModeIq({
+        groupJid: '120363@g.us',
+        mode: 'admin_link'
+    })
+    const linkChild = (link.content as readonly BinaryNode[])[0]
+    assert.equal(linkChild.tag, 'member_link_mode')
+    assert.equal(linkChild.content, 'admin_link')
+
+    const share = buildSetGroupMemberShareGroupHistoryModeIq({
+        groupJid: '120363@g.us',
+        mode: 'all_member_share'
+    })
+    const shareChild = (share.content as readonly BinaryNode[])[0]
+    assert.equal(shareChild.tag, 'member_share_group_history_mode')
+    assert.equal(shareChild.content, 'all_member_share')
+})
+
+test('buildSetGroupEphemeralIq shapes ephemeral IQ with expiration and optional trigger', () => {
+    const noTrigger = buildSetGroupEphemeralIq({
+        groupJid: '120363@g.us',
+        expirationSeconds: 86400
+    })
+    const noTriggerChild = (noTrigger.content as readonly BinaryNode[])[0]
+    assert.equal(noTriggerChild.tag, 'ephemeral')
+    assert.equal(noTriggerChild.attrs.expiration, '86400')
+    assert.equal(noTriggerChild.attrs.trigger, undefined)
+
+    const withTrigger = buildSetGroupEphemeralIq({
+        groupJid: '120363@g.us',
+        expirationSeconds: 604800,
+        trigger: 1
+    })
+    const withTriggerChild = (withTrigger.content as readonly BinaryNode[])[0]
+    assert.equal(withTriggerChild.attrs.expiration, '604800')
+    assert.equal(withTriggerChild.attrs.trigger, '1')
+})
+
+test('buildSetDisappearingModeIq shapes IQ with duration string attr', () => {
+    const node = buildSetDisappearingModeIq(86400)
+    assert.equal(node.attrs.type, 'set')
+    assert.equal(node.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal(node.attrs.xmlns, 'disappearing_mode')
+    const child = (node.content as readonly BinaryNode[])[0]
+    assert.equal(child.tag, 'disappearing_mode')
+    assert.equal(child.attrs.duration, '86400')
+
+    const disabled = buildSetDisappearingModeIq(0)
+    const disabledChild = (disabled.content as readonly BinaryNode[])[0]
+    assert.equal(disabledChild.attrs.duration, '0')
+})
+
+test('membership approval + join-linked-group builders shape iqs', () => {
+    const list = buildGetMembershipApprovalRequestsIq('parent@g.us')
+    assert.equal(list.attrs.to, 'parent@g.us')
+    assert.equal(list.attrs.type, 'get')
+    assert.equal((list.content as BinaryNode[])[0].tag, 'membership_approval_requests')
+
+    const action = buildMembershipRequestsActionIq({
+        groupJid: 'parent@g.us',
+        approve: ['a@s.whatsapp.net'],
+        reject: ['b@s.whatsapp.net', 'c@s.whatsapp.net']
+    })
+    const actionRoot = (action.content as BinaryNode[])[0]
+    assert.equal(actionRoot.tag, 'membership_requests_action')
+    const actionChildren = actionRoot.content as BinaryNode[]
+    const approveNode = actionChildren.find((n) => n.tag === 'approve')
+    const rejectNode = actionChildren.find((n) => n.tag === 'reject')
+    assert.equal((approveNode?.content as BinaryNode[]).length, 1)
+    assert.equal((rejectNode?.content as BinaryNode[]).length, 2)
+
+    assert.throws(
+        () => buildMembershipRequestsActionIq({ groupJid: 'p@g.us' }),
+        /approve or reject/
+    )
+
+    const cancel = buildCancelMembershipRequestsIq({
+        groupJid: 'parent@g.us',
+        participantJids: ['x@s.whatsapp.net']
+    })
+    assert.equal((cancel.content as BinaryNode[])[0].tag, 'cancel_membership_requests')
+    assert.throws(
+        () => buildCancelMembershipRequestsIq({ groupJid: 'p@g.us', participantJids: [] }),
+        /at least one participant/
+    )
+
+    const join = buildJoinLinkedGroupIq({
+        groupJid: 'parent@g.us',
+        subGroupJid: 'sub@g.us',
+        type: 'community'
+    })
+    const joinRoot = (join.content as BinaryNode[])[0]
+    assert.equal(joinRoot.tag, 'join_linked_group')
+    assert.equal(joinRoot.attrs.jid, 'sub@g.us')
+    assert.equal(joinRoot.attrs.type, 'community')
+
+    const joinNoType = buildJoinLinkedGroupIq({
+        groupJid: 'parent@g.us',
+        subGroupJid: 'sub@g.us'
+    })
+    assert.equal((joinNoType.content as BinaryNode[])[0].attrs.type, undefined)
+})
+
+test('group create accepts community/subgroup options', () => {
+    const community = buildCreateGroupIq({
+        subject: 'My Community',
+        participants: [],
+        parent: { defaultMembershipApprovalMode: 'request_required' },
+        allowNonAdminSubGroupCreation: true,
+        createGeneralChat: true
+    })
+    const create = (community.content as BinaryNode[])[0]
+    const children = create.content as BinaryNode[]
+    const parent = children.find((c) => c.tag === 'parent')
+    assert.ok(parent)
+    assert.equal(parent.attrs.default_membership_approval_mode, 'request_required')
+    assert.ok(children.find((c) => c.tag === 'allow_non_admin_sub_group_creation'))
+    assert.ok(children.find((c) => c.tag === 'create_general_chat'))
+
+    const openCommunity = buildCreateGroupIq({
+        subject: 'Open',
+        participants: [],
+        parent: true
+    })
+    const openParent = ((openCommunity.content as BinaryNode[])[0].content as BinaryNode[]).find(
+        (c) => c.tag === 'parent'
+    )
+    assert.ok(openParent)
+    assert.equal(openParent.attrs.default_membership_approval_mode, undefined)
+
+    const subgroup = buildCreateGroupIq({
+        subject: 'Sub',
+        participants: ['5511999999999@s.whatsapp.net'],
+        linkedParentJid: 'parent@g.us'
+    })
+    const linkedParent = ((subgroup.content as BinaryNode[])[0].content as BinaryNode[]).find(
+        (c) => c.tag === 'linked_parent'
+    )
+    assert.ok(linkedParent)
+    assert.equal(linkedParent.attrs.jid, 'parent@g.us')
+})
+
+test('community builders shape link/unlink/delete/linked-participants iqs', () => {
+    const link = buildLinkSubGroupsIq({
+        communityJid: 'parent@g.us',
+        subGroups: [{ jid: 'a@g.us' }, { jid: 'b@g.us', hidden: true }]
+    })
+    assert.equal(link.attrs.to, 'parent@g.us')
+    assert.equal(link.attrs.type, 'set')
+    const links = (link.content as BinaryNode[])[0]
+    assert.equal(links.tag, 'links')
+    const linkChild = (links.content as BinaryNode[])[0]
+    assert.equal(linkChild.attrs.link_type, 'sub_group')
+    const groups = linkChild.content as BinaryNode[]
+    assert.equal(groups.length, 2)
+    assert.equal(groups[0].attrs.jid, 'a@g.us')
+    assert.equal((groups[0].content as BinaryNode[] | undefined)?.length, undefined)
+    const hiddenChildren = groups[1].content as BinaryNode[]
+    assert.equal(hiddenChildren[0].tag, 'hidden_group')
+
+    assert.throws(() => buildLinkSubGroupsIq({ communityJid: 'p@g.us', subGroups: [] }))
+
+    const unlink = buildUnlinkSubGroupsIq({
+        communityJid: 'parent@g.us',
+        subGroupJids: ['a@g.us', 'b@g.us'],
+        removeOrphanedMembers: true
+    })
+    const unlinkRoot = (unlink.content as BinaryNode[])[0]
+    assert.equal(unlinkRoot.tag, 'unlink')
+    assert.equal(unlinkRoot.attrs.unlink_type, 'sub_group')
+    const unlinkGroups = unlinkRoot.content as BinaryNode[]
+    assert.equal(unlinkGroups[0].attrs.remove_orphaned_members, 'true')
+
+    const unlinkNoOrphan = buildUnlinkSubGroupsIq({
+        communityJid: 'parent@g.us',
+        subGroupJids: ['x@g.us']
+    })
+    const noOrphanGroup = ((unlinkNoOrphan.content as BinaryNode[])[0].content as BinaryNode[])[0]
+    assert.equal(noOrphanGroup.attrs.remove_orphaned_members, undefined)
+
+    const deactivate = buildDeactivateCommunityIq('parent@g.us')
+    assert.equal(deactivate.attrs.to, 'parent@g.us')
+    assert.equal((deactivate.content as BinaryNode[])[0].tag, 'delete_parent')
+
+    const linkedParticipants = buildLinkedGroupsParticipantsIq('parent@g.us')
+    assert.equal(linkedParticipants.attrs.type, 'get')
+    assert.equal((linkedParticipants.content as BinaryNode[])[0].tag, 'linked_groups_participants')
+})
+
+test('message builders create fanout nodes and validate participant requirements', () => {
+    const participant = {
+        jid: '5511999999999:2@s.whatsapp.net',
+        encType: 'msg' as const,
+        ciphertext: new Uint8Array([1, 2, 3])
+    }
+
+    const node = buildDirectMessageFanoutNode({
+        to: '5511999999999@s.whatsapp.net',
+        type: 'text',
+        id: 'm1',
+        participants: [participant],
+        customNodes: [
+            {
+                tag: 'reporting',
+                attrs: {},
+                content: [
+                    {
+                        tag: 'reporting_token',
+                        attrs: { v: '2' },
+                        content: new Uint8Array([9])
+                    }
+                ]
+            },
+            {
+                tag: WA_PRIVACY_TOKEN_TAGS.TC_TOKEN,
+                attrs: {},
+                content: new Uint8Array([4])
+            }
+        ]
+    })
+
+    assert.equal(node.tag, 'message')
+    assert.equal(node.attrs.id, 'm1')
+    const participantsNode = Array.isArray(node.content)
+        ? node.content.find((child) => child.tag === WA_NODE_TAGS.PARTICIPANTS)
+        : null
+    assert.ok(participantsNode)
+    const reportingNode = Array.isArray(node.content)
+        ? node.content.find((child) => child.tag === 'reporting')
+        : null
+    assert.ok(reportingNode)
+    const tcTokenNode = Array.isArray(node.content)
+        ? node.content.find((child) => child.tag === WA_PRIVACY_TOKEN_TAGS.TC_TOKEN)
+        : null
+    assert.ok(tcTokenNode)
+
+    assert.throws(
+        () =>
+            buildDirectMessageFanoutNode({
+                to: 'x@s.whatsapp.net',
+                type: 'text',
+                participants: []
+            }),
+        /requires at least one participant/
+    )
+
+    const retryNode = buildGroupRetryMessageNode({
+        to: '123@g.us',
+        type: 'text',
+        id: 'id-1',
+        requesterJid: '5511:3@s.whatsapp.net',
+        addressingMode: 'pn',
+        encType: 'msg',
+        ciphertext: new Uint8Array([9]),
+        retryCount: 2
+    })
+    assert.equal(retryNode.attrs.participant, '5511:3@s.whatsapp.net')
+    assert.ok(Array.isArray(retryNode.content))
+    assert.equal(retryNode.content[0].tag, 'enc')
+    assert.equal(retryNode.content[0].attrs.type, 'msg')
+    assert.equal(retryNode.content[0].attrs.count, '2')
+
+    const statusRetry = buildGroupRetryMessageNode({
+        to: 'status@broadcast',
+        type: 'text',
+        id: 'id-status',
+        requesterJid: '5511:3@lid',
+        encType: 'pkmsg',
+        ciphertext: new Uint8Array([1]),
+        retryCount: 1,
+        metaNode: buildMetaNode({ status_setting: 'denylist' })
+    })
+    // status@broadcast retries omit `addressing_mode`
+    assert.equal(statusRetry.attrs.addressing_mode, undefined)
+    if (!Array.isArray(statusRetry.content)) {
+        throw new Error('expected status retry content array')
+    }
+    assert.equal(statusRetry.content[0].tag, 'meta')
+    assert.equal(statusRetry.content[0].attrs.status_setting, 'denylist')
+    assert.equal(statusRetry.content[1].tag, 'enc')
+
+    const inboundRetry = buildReceiptNode({
+        kind: 'retry',
+        node: {
+            tag: 'message',
+            attrs: { t: '10', participant: '5511:2@s.whatsapp.net' }
+        },
+        id: 'msg-1',
+        to: '5511@s.whatsapp.net',
+        retryCount: 2
+    })
+    assert.equal(inboundRetry.attrs.type, 'retry')
+    assert.ok(Array.isArray(inboundRetry.content))
+    if (!Array.isArray(inboundRetry.content)) {
+        throw new Error('expected retry receipt content array')
+    }
+    assert.equal(inboundRetry.content[0].attrs.t, '10')
+
+    const listAddon = buildButtonAddonNode('list')
+    assert.equal(listAddon.tag, 'biz')
+    if (!Array.isArray(listAddon.content)) throw new Error('expected biz children')
+    assert.equal(listAddon.content[0].tag, 'list')
+    assert.equal(listAddon.content[0].attrs.type, 'product_list')
+    assert.equal(listAddon.content[0].attrs.v, '2')
+
+    const interactiveAddon = buildButtonAddonNode('interactive')
+    assert.equal(interactiveAddon.tag, 'biz')
+    if (!Array.isArray(interactiveAddon.content)) throw new Error('expected biz children')
+    const interactiveChild = interactiveAddon.content[0]
+    assert.equal(interactiveChild.tag, 'interactive')
+    assert.equal(interactiveChild.attrs.type, 'native_flow')
+    assert.equal(interactiveChild.attrs.v, '1')
+    if (!Array.isArray(interactiveChild.content)) {
+        throw new Error('expected native_flow child')
+    }
+    assert.equal(interactiveChild.content[0].tag, 'native_flow')
+    assert.equal(interactiveChild.content[0].attrs.name, 'mixed')
+    assert.equal(interactiveChild.content[0].attrs.v, '9')
+
+    const pixAddon = buildButtonAddonNode('payment_info')
+    assert.equal(pixAddon.tag, 'biz')
+    if (!Array.isArray(pixAddon.content)) throw new Error('expected biz children')
+    const pixInteractive = pixAddon.content[0]
+    assert.equal(pixInteractive.tag, 'interactive')
+    assert.equal(pixInteractive.attrs.type, 'native_flow')
+    if (!Array.isArray(pixInteractive.content)) {
+        throw new Error('expected native_flow child')
+    }
+    assert.equal(pixInteractive.content[0].tag, 'native_flow')
+    assert.equal(pixInteractive.content[0].attrs.name, 'payment_info')
+    assert.equal(pixInteractive.content[0].attrs.v, undefined)
+
+    const reviewAddon = buildButtonAddonNode('order_details')
+    if (!Array.isArray(reviewAddon.content)) throw new Error('expected biz children')
+    const reviewInteractive = reviewAddon.content[0]
+    if (!Array.isArray(reviewInteractive.content)) {
+        throw new Error('expected native_flow child')
+    }
+    assert.equal(reviewInteractive.content[0].attrs.name, 'order_details')
+    assert.equal(reviewInteractive.content[0].attrs.v, undefined)
+
+    const fanoutWithAddon = buildDirectMessageFanoutNode({
+        to: '5511@s.whatsapp.net',
+        type: 'text',
+        id: 'btn-1',
+        participants: [participant],
+        customNodes: [interactiveAddon]
+    })
+    const addonChild = Array.isArray(fanoutWithAddon.content)
+        ? fanoutWithAddon.content.find((child) => child.tag === 'biz')
+        : null
+    assert.ok(addonChild)
+})
+
+test('privacy token builders create iq and message token nodes', () => {
+    const iq = buildPrivacyTokenIqNode({
+        jid: '5511999999999@s.whatsapp.net',
+        timestampS: 123
+    })
+    assert.equal(iq.tag, WA_NODE_TAGS.IQ)
+    assert.equal(iq.attrs.type, 'set')
+    assert.equal(iq.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.ok(Array.isArray(iq.content))
+    if (!Array.isArray(iq.content)) {
+        throw new Error('expected privacy token iq content array')
+    }
+    assert.equal(iq.content[0].tag, WA_PRIVACY_TOKEN_TAGS.TOKENS)
+    assert.ok(Array.isArray(iq.content[0].content))
+    if (!Array.isArray(iq.content[0].content)) {
+        throw new Error('expected privacy token list content array')
+    }
+    assert.equal(iq.content[0].content[0].attrs.jid, '5511999999999@s.whatsapp.net')
+    assert.equal(iq.content[0].content[0].attrs.type, WA_PRIVACY_TOKEN_TYPES.TRUSTED_CONTACT)
+    assert.equal(iq.content[0].content[0].attrs.t, '123')
+
+    const customTypeIq = buildPrivacyTokenIqNode({
+        jid: '5511888888888:12@s.whatsapp.net',
+        timestampS: 456,
+        type: 'custom_type'
+    })
+    assert.ok(Array.isArray(customTypeIq.content))
+    if (!Array.isArray(customTypeIq.content)) {
+        throw new Error('expected custom privacy token iq content array')
+    }
+    assert.ok(Array.isArray(customTypeIq.content[0].content))
+    if (!Array.isArray(customTypeIq.content[0].content)) {
+        throw new Error('expected custom privacy token list content array')
+    }
+    assert.equal(customTypeIq.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal(customTypeIq.content[0].content[0].attrs.jid, '5511888888888@s.whatsapp.net')
+    assert.equal(customTypeIq.content[0].content[0].attrs.type, 'custom_type')
+    assert.equal(customTypeIq.content[0].content[0].attrs.t, '456')
+
+    const tcNode = buildTcTokenMessageNode(new Uint8Array([7]))
+    assert.equal(tcNode.tag, WA_PRIVACY_TOKEN_TAGS.TC_TOKEN)
+    assert.ok(tcNode.content instanceof Uint8Array)
+
+    const csNode = buildCsTokenMessageNode(new Uint8Array([8]))
+    assert.equal(csNode.tag, WA_PRIVACY_TOKEN_TAGS.CS_TOKEN)
+    assert.ok(csNode.content instanceof Uint8Array)
+})
+
+test('privacy builders generate expected iq payloads', () => {
+    const getSettings = buildGetPrivacySettingsIq()
+    assert.equal(getSettings.attrs.type, 'get')
+    assert.equal(getSettings.attrs.xmlns, WA_XMLNS.PRIVACY)
+    assert.ok(Array.isArray(getSettings.content))
+    if (!Array.isArray(getSettings.content)) {
+        throw new Error('expected get privacy settings content array')
+    }
+    assert.equal(getSettings.content[0].tag, WA_NODE_TAGS.PRIVACY)
+
+    const setCategory = buildSetPrivacyCategoryIq(WA_PRIVACY_CATEGORIES.ONLINE, 'match_last_seen')
+    assert.equal(setCategory.attrs.type, 'set')
+    assert.equal(setCategory.attrs.xmlns, WA_XMLNS.PRIVACY)
+    assert.ok(Array.isArray(setCategory.content))
+    if (!Array.isArray(setCategory.content)) {
+        throw new Error('expected set privacy category content array')
+    }
+    assert.equal(setCategory.content[0].tag, WA_NODE_TAGS.PRIVACY)
+    assert.ok(Array.isArray(setCategory.content[0].content))
+    if (!Array.isArray(setCategory.content[0].content)) {
+        throw new Error('expected set privacy category payload array')
+    }
+    assert.equal(setCategory.content[0].content[0].tag, WA_PRIVACY_TAGS.CATEGORY)
+    assert.equal(setCategory.content[0].content[0].attrs.name, WA_PRIVACY_CATEGORIES.ONLINE)
+    assert.equal(setCategory.content[0].content[0].attrs.value, 'match_last_seen')
+
+    const disallowed = buildGetPrivacyDisallowedListIq(WA_PRIVACY_CATEGORIES.ABOUT, false)
+    assert.equal(disallowed.attrs.type, 'get')
+    assert.equal(disallowed.attrs.xmlns, WA_XMLNS.PRIVACY)
+    assert.ok(Array.isArray(disallowed.content))
+    if (!Array.isArray(disallowed.content)) {
+        throw new Error('expected get disallowed list content array')
+    }
+    assert.equal(disallowed.content[0].tag, WA_NODE_TAGS.PRIVACY)
+    assert.equal(disallowed.content[0].attrs.addressing_mode, undefined)
+    assert.ok(Array.isArray(disallowed.content[0].content))
+    if (!Array.isArray(disallowed.content[0].content)) {
+        throw new Error('expected get disallowed list payload array')
+    }
+    assert.equal(disallowed.content[0].content[0].tag, WA_PRIVACY_TAGS.LIST)
+    assert.equal(disallowed.content[0].content[0].attrs.name, WA_PRIVACY_CATEGORIES.ABOUT)
+    assert.equal(disallowed.content[0].content[0].attrs.value, 'contact_blacklist')
+
+    const disallowedLid = buildGetPrivacyDisallowedListIq(WA_PRIVACY_CATEGORIES.LAST_SEEN, true)
+    if (!Array.isArray(disallowedLid.content)) {
+        throw new Error('expected lid disallowed list content array')
+    }
+    assert.equal(disallowedLid.content[0].attrs.addressing_mode, 'lid')
+
+    const listSet = buildSetPrivacyDisallowedListIq(
+        WA_PRIVACY_CATEGORIES.LAST_SEEN,
+        [
+            { action: 'add', lidJid: '999@lid', pnJid: '5511@s.whatsapp.net' },
+            { action: 'remove', lidJid: '888@lid', pnJid: null }
+        ],
+        '1785262526802',
+        true
+    )
+    assert.equal(listSet.attrs.type, 'set')
+    if (!Array.isArray(listSet.content) || !Array.isArray(listSet.content[0].content)) {
+        throw new Error('expected set disallowed list payload array')
+    }
+    assert.equal(listSet.content[0].attrs.addressing_mode, 'lid')
+    const listCategory = listSet.content[0].content[0]
+    assert.deepEqual(listCategory.attrs, {
+        name: WA_PRIVACY_CATEGORIES.LAST_SEEN,
+        value: 'contact_blacklist',
+        dhash: '1785262526802'
+    })
+    if (!Array.isArray(listCategory.content)) {
+        throw new Error('expected set disallowed list user array')
+    }
+    assert.deepEqual(listCategory.content[0].attrs, {
+        action: 'add',
+        jid: '999@lid',
+        pn_jid: '5511@s.whatsapp.net'
+    })
+    assert.deepEqual(listCategory.content[1].attrs, { action: 'remove', jid: '888@lid' })
+
+    const listSetPn = buildSetPrivacyDisallowedListIq(
+        WA_PRIVACY_CATEGORIES.LAST_SEEN,
+        [{ action: 'add', lidJid: null, pnJid: '5511@s.whatsapp.net' }],
+        null,
+        false
+    )
+    if (!Array.isArray(listSetPn.content) || !Array.isArray(listSetPn.content[0].content)) {
+        throw new Error('expected pn disallowed list payload array')
+    }
+    assert.equal(listSetPn.content[0].attrs.addressing_mode, undefined)
+    const pnCategory = listSetPn.content[0].content[0]
+    assert.equal(pnCategory.attrs.dhash, 'none')
+    if (!Array.isArray(pnCategory.content)) {
+        throw new Error('expected pn disallowed list user array')
+    }
+    assert.deepEqual(pnCategory.content[0].attrs, {
+        action: 'add',
+        jid: '5511@s.whatsapp.net'
+    })
+
+    const blocklist = buildGetBlocklistIq()
+    assert.equal(blocklist.attrs.type, 'get')
+    assert.equal(blocklist.attrs.xmlns, WA_XMLNS.BLOCKLIST)
+    assert.equal(blocklist.content, undefined)
+
+    const nonMigratedBlock = buildBlocklistBlockIq({
+        lidJid: null,
+        pnJid: '5511999999999@s.whatsapp.net'
+    })
+    assert.equal(nonMigratedBlock.attrs.type, 'set')
+    assert.equal(nonMigratedBlock.attrs.xmlns, WA_XMLNS.BLOCKLIST)
+    assert.ok(Array.isArray(nonMigratedBlock.content))
+    if (!Array.isArray(nonMigratedBlock.content)) {
+        throw new Error('expected blocklist change content array')
+    }
+    assert.equal(nonMigratedBlock.content[0].tag, 'item')
+    assert.deepEqual(nonMigratedBlock.content[0].attrs, {
+        action: 'block',
+        jid: '5511999999999@s.whatsapp.net'
+    })
+
+    const migratedBlock = buildBlocklistBlockIq({
+        lidJid: '999@lid',
+        pnJid: '5511999999999@s.whatsapp.net'
+    })
+    assert.ok(Array.isArray(migratedBlock.content))
+    if (!Array.isArray(migratedBlock.content)) {
+        throw new Error('expected migrated block content array')
+    }
+    assert.deepEqual(migratedBlock.content[0].attrs, {
+        action: 'block',
+        jid: '999@lid',
+        pn_jid: '5511999999999@s.whatsapp.net'
+    })
+
+    const unknownIdentifierBlock = buildBlocklistBlockIq({ lidJid: '999@lid', pnJid: null })
+    assert.ok(Array.isArray(unknownIdentifierBlock.content))
+    if (!Array.isArray(unknownIdentifierBlock.content)) {
+        throw new Error('expected unknown-identifier block content array')
+    }
+    assert.deepEqual(unknownIdentifierBlock.content[0].attrs, {
+        action: 'block',
+        jid: '999@lid',
+        unknown_identifier: 'true'
+    })
+
+    const unblock = buildBlocklistUnblockIq('999@lid')
+    assert.equal(unblock.attrs.type, 'set')
+    assert.equal(unblock.attrs.xmlns, WA_XMLNS.BLOCKLIST)
+    assert.ok(Array.isArray(unblock.content))
+    if (!Array.isArray(unblock.content)) {
+        throw new Error('expected unblock content array')
+    }
+    assert.deepEqual(unblock.content[0].attrs, { jid: '999@lid', action: 'unblock' })
+})
+
+test('message builders cover group and inbound receipt branches', () => {
+    const groupWithParticipants = buildGroupSenderKeyMessageNode({
+        to: '123@g.us',
+        type: 'text',
+        id: 'm-1',
+        phash: 'p1',
+        addressingMode: 'pn',
+        groupCiphertext: new Uint8Array([7, 8, 9]),
+        participants: [
+            {
+                jid: '5511999999999:2@s.whatsapp.net',
+                encType: 'msg',
+                ciphertext: new Uint8Array([1])
+            }
+        ],
+        deviceIdentity: new Uint8Array([2, 3]),
+        customNodes: [
+            {
+                tag: 'reporting',
+                attrs: {},
+                content: [
+                    {
+                        tag: 'reporting_token',
+                        attrs: { v: '2' },
+                        content: new Uint8Array([1, 2])
+                    }
+                ]
+            }
+        ]
+    })
+    assert.equal(groupWithParticipants.attrs.addressing_mode, 'pn')
+    assert.ok(Array.isArray(groupWithParticipants.content))
+    assert.equal(groupWithParticipants.content[0].tag, WA_NODE_TAGS.PARTICIPANTS)
+    assert.equal(
+        groupWithParticipants.content[groupWithParticipants.content.length - 1].tag,
+        'reporting'
+    )
+
+    const groupWithoutParticipants = buildGroupSenderKeyMessageNode({
+        to: '123@g.us',
+        type: 'text',
+        groupCiphertext: new Uint8Array([1]),
+        participants: []
+    })
+    assert.ok(Array.isArray(groupWithoutParticipants.content))
+    assert.equal(groupWithoutParticipants.content[0].tag, 'enc')
+
+    const groupDirect = buildDirectMessageFanoutNode({
+        to: '123@g.us',
+        type: 'text',
+        id: 'gd-1',
+        phash: 'ph',
+        addressingMode: 'lid',
+        participants: [
+            {
+                jid: '5511999999999:2@s.whatsapp.net',
+                encType: 'pkmsg',
+                ciphertext: new Uint8Array([4, 5])
+            }
+        ],
+        deviceIdentity: new Uint8Array([6])
+    })
+    assert.equal(groupDirect.attrs.addressing_mode, 'lid')
+    assert.ok(Array.isArray(groupDirect.content))
+    assert.equal(groupDirect.content.length, 2)
+    assert.throws(
+        () =>
+            buildDirectMessageFanoutNode({
+                to: '123@g.us',
+                type: 'text',
+                participants: []
+            }),
+        /requires at least one participant/
+    )
+
+    const messageAck = buildAckNode({
+        kind: 'message',
+        node: {
+            tag: 'message',
+            attrs: { type: 'text', participant: '5511:2@s.whatsapp.net' }
+        },
+        id: 'm1',
+        to: '5511@s.whatsapp.net',
+        from: 'me@s.whatsapp.net'
+    })
+    assert.equal(messageAck.tag, 'ack')
+    assert.equal(messageAck.attrs.type, 'text')
+    assert.equal(messageAck.attrs.participant, '5511:2@s.whatsapp.net')
+    assert.equal(messageAck.attrs.from, 'me@s.whatsapp.net')
+
+    const delivery = buildReceiptNode({
+        kind: 'delivery',
+        node: {
+            tag: 'message',
+            attrs: { participant: '5511:2@s.whatsapp.net', category: 'peer' }
+        },
+        id: 'm1',
+        to: '5511@s.whatsapp.net'
+    })
+    assert.equal(delivery.tag, 'receipt')
+    assert.equal(delivery.attrs.type, 'peer_msg')
+    assert.equal('participant' in delivery.attrs, false)
+
+    const groupDelivery = buildReceiptNode({
+        kind: 'delivery',
+        node: {
+            tag: 'message',
+            attrs: { participant: '5511:2@s.whatsapp.net' }
+        },
+        id: 'm1',
+        to: '12345@g.us'
+    })
+    assert.equal(groupDelivery.attrs.participant, '5511:2@s.whatsapp.net')
+
+    const retryNoTimestamp = buildReceiptNode({
+        kind: 'retry',
+        node: {
+            tag: 'message',
+            attrs: {}
+        },
+        id: 'm2',
+        to: '5511@s.whatsapp.net',
+        retryCount: 0
+    })
+    assert.equal(retryNoTimestamp.attrs.type, 'retry')
+    assert.ok(Array.isArray(retryNoTimestamp.content))
+    assert.equal(retryNoTimestamp.content[0].attrs.count, '1')
+    assert.equal('from' in retryNoTimestamp.attrs, false)
+
+    const retryPeer = buildReceiptNode({
+        kind: 'retry',
+        node: {
+            tag: 'message',
+            attrs: { category: 'peer' }
+        },
+        id: 'm3',
+        to: '5511@s.whatsapp.net',
+        retryCount: 1
+    })
+    assert.equal(retryPeer.attrs.category, 'peer')
+
+    const retryAck = buildAckNode({
+        kind: 'receipt',
+        retryType: true,
+        node: {
+            tag: 'receipt',
+            attrs: {
+                id: 'r1',
+                from: '5511@s.whatsapp.net',
+                participant: '5511:2@s.whatsapp.net'
+            }
+        }
+    })
+    assert.equal(retryAck.attrs.type, 'retry')
+    assert.equal(retryAck.attrs.to, '5511@s.whatsapp.net')
+    assert.equal(retryAck.attrs.participant, '5511:2@s.whatsapp.net')
+
+    const receiptAckWithParticipant = buildAckNode({
+        kind: 'receipt',
+        node: {
+            tag: 'receipt',
+            attrs: {
+                id: 'r2',
+                from: '5511@s.whatsapp.net',
+                type: 'sender',
+                participant: '5511:3@s.whatsapp.net'
+            }
+        }
+    })
+    assert.equal(receiptAckWithParticipant.attrs.participant, '5511:3@s.whatsapp.net')
+
+    const receiptAckWithoutParticipant = buildAckNode({
+        kind: 'receipt',
+        node: {
+            tag: 'receipt',
+            attrs: {
+                id: 'r3',
+                from: '5511@s.whatsapp.net',
+                participant: '5511@s.whatsapp.net'
+            }
+        }
+    })
+    assert.equal('participant' in receiptAckWithoutParticipant.attrs, false)
+
+    const serverErrorAckWithoutParticipant = buildAckNode({
+        kind: 'receipt',
+        includeParticipant: false,
+        node: {
+            tag: 'receipt',
+            attrs: {
+                id: 'r4',
+                from: '5511@s.whatsapp.net',
+                type: 'server-error',
+                participant: '5511:9@s.whatsapp.net'
+            }
+        }
+    })
+    assert.equal('participant' in serverErrorAckWithoutParticipant.attrs, false)
+
+    const aggregateAck = buildAckNode({
+        kind: 'aggregate_message',
+        to: '5511@s.whatsapp.net',
+        ids: ['m1', 'm2', 'm3'],
+        type: 'text',
+        recipient: '5511@s.whatsapp.net',
+        participant: '5511:2@s.whatsapp.net'
+    })
+    assert.equal(aggregateAck.attrs.class, 'message')
+    assert.equal(aggregateAck.attrs.id, 'm1')
+    assert.equal(aggregateAck.attrs.type, 'text')
+    assert.equal(aggregateAck.attrs.recipient, '5511@s.whatsapp.net')
+    assert.equal(aggregateAck.attrs.participant, '5511:2@s.whatsapp.net')
+    assert.ok(Array.isArray(aggregateAck.content))
+    if (!Array.isArray(aggregateAck.content)) {
+        throw new Error('expected aggregate ack content array')
+    }
+    assert.equal(aggregateAck.content[0].tag, WA_NODE_TAGS.LIST)
+    assert.ok(Array.isArray(aggregateAck.content[0].content))
+    assert.equal(aggregateAck.content[0].content.length, 2)
+    assert.equal(aggregateAck.content[0].content[0].attrs.id, 'm2')
+
+    const nack = buildAckNode({
+        kind: 'nack',
+        stanzaTag: 'message',
+        id: 'msg-nack-1',
+        to: '5511@s.whatsapp.net',
+        type: 'text',
+        participant: '5511:2@s.whatsapp.net',
+        error: 491,
+        failureReason: 12
+    })
+    assert.equal(nack.attrs.class, 'message')
+    assert.equal(nack.attrs.error, '491')
+    assert.ok(Array.isArray(nack.content))
+    if (!Array.isArray(nack.content)) {
+        throw new Error('expected nack content array')
+    }
+    assert.equal(nack.content[0].tag, 'meta')
+    assert.equal(nack.content[0].attrs.failure_reason, '12')
+})
+
+test('message builders merge additionalAttributes with user-wins semantics', () => {
+    const direct = buildDirectMessageFanoutNode({
+        to: '5511@s.whatsapp.net',
+        type: 'text',
+        id: 'm1',
+        participants: [
+            {
+                jid: '5511:2@s.whatsapp.net',
+                encType: 'msg',
+                ciphertext: new Uint8Array([1])
+            }
+        ],
+        additionalAttributes: { category: 'peer', type: 'media' }
+    })
+    assert.equal(direct.attrs.to, '5511@s.whatsapp.net')
+    assert.equal(direct.attrs.id, 'm1')
+    assert.equal(direct.attrs.category, 'peer')
+    // user-wins: additionalAttributes.type override the protocol type
+    assert.equal(direct.attrs.type, 'media')
+
+    const group = buildGroupSenderKeyMessageNode({
+        to: '123@g.us',
+        type: 'text',
+        id: 'g1',
+        groupCiphertext: new Uint8Array([2]),
+        participants: [],
+        additionalAttributes: { push_priority: 'high' }
+    })
+    assert.equal(group.attrs.push_priority, 'high')
+    assert.equal(group.attrs.to, '123@g.us')
+    assert.equal(group.attrs.type, 'text')
+})
+
+test('direct fanout stamps peer_recipient_pn when provided and omits it otherwise', () => {
+    const participants = [
+        {
+            jid: '88880000:1@lid',
+            encType: 'msg' as const,
+            ciphertext: new Uint8Array([1])
+        }
+    ]
+    const withPn = buildDirectMessageFanoutNode({
+        to: '88880000@lid',
+        type: 'text',
+        id: 'm1',
+        participants,
+        peerRecipientPn: '5511999999999@s.whatsapp.net'
+    })
+    assert.equal(withPn.attrs.to, '88880000@lid')
+    assert.equal(withPn.attrs.peer_recipient_pn, '5511999999999@s.whatsapp.net')
+
+    const withoutPn = buildDirectMessageFanoutNode({
+        to: '88880000@lid',
+        type: 'text',
+        id: 'm2',
+        participants
+    })
+    assert.equal(withoutPn.attrs.peer_recipient_pn, undefined)
+})
+
+test('pairing builders generate link-code nodes and ack helpers', () => {
+    const hello = buildCompanionHelloRequestNode({
+        phoneJid: '5511999999999@s.whatsapp.net',
+        shouldShowPushNotification: true,
+        wrappedCompanionEphemeralPub: new Uint8Array([1]),
+        companionServerAuthKeyPub: new Uint8Array([2]),
+        companionPlatformId: 'android',
+        companionPlatformDisplay: 'Android'
+    })
+    assert.equal(hello.tag, 'iq')
+    assert.ok(Array.isArray(hello.content))
+    const helloReg = hello.content[0]
+    assert.equal(helloReg.attrs.stage, 'companion_hello')
+    assert.equal(helloReg.attrs.should_show_push_notification, 'true')
+
+    const countryCode = buildGetCountryCodeRequestNode()
+    assert.equal(countryCode.attrs.type, 'get')
+    assert.ok(Array.isArray(countryCode.content))
+    assert.equal(countryCode.content[0].attrs.stage, 'get_country_code')
+
+    const finish = buildCompanionFinishRequestNode({
+        phoneJid: '5511999999999@s.whatsapp.net',
+        wrappedKeyBundle: new Uint8Array([4]),
+        companionIdentityPublic: new Uint8Array([5]),
+        ref: new Uint8Array([6])
+    })
+    assert.equal(finish.attrs.type, 'set')
+    assert.ok(Array.isArray(finish.content))
+    assert.equal(finish.content[0].attrs.stage, 'companion_finish')
+
+    const ackDefault = buildAckNode({
+        kind: 'notification',
+        node: {
+            tag: 'notification',
+            attrs: { from: 's.whatsapp.net', type: 'encrypt', id: 'ack-1' }
+        }
+    })
+    assert.equal(ackDefault.tag, 'ack')
+    assert.equal(ackDefault.attrs.to, 's.whatsapp.net')
+    assert.equal(ackDefault.attrs.type, 'encrypt')
+    assert.equal(ackDefault.attrs.id, 'ack-1')
+
+    const ackOverridden = buildAckNode({
+        kind: 'notification',
+        node: {
+            tag: 'notification',
+            attrs: {}
+        },
+        typeOverride: 'custom'
+    })
+    assert.equal(ackOverridden.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal(ackOverridden.attrs.type, 'custom')
+    assert.equal('id' in ackOverridden.attrs, false)
+
+    const ackWithoutType = buildAckNode({
+        kind: 'notification',
+        node: {
+            tag: 'notification',
+            attrs: { from: 's.whatsapp.net', type: 'encrypt', id: 'ack-1b' }
+        },
+        includeParticipant: false,
+        includeType: false
+    })
+    assert.equal(ackWithoutType.attrs.to, 's.whatsapp.net')
+    assert.equal('type' in ackWithoutType.attrs, false)
+    assert.equal(ackWithoutType.attrs.id, 'ack-1b')
+
+    const groupAckWithoutParticipant = buildAckNode({
+        kind: 'notification',
+        node: {
+            tag: 'notification',
+            attrs: {
+                from: '12345@g.us',
+                type: 'w:gp2',
+                id: 'ack-2',
+                participant: '5511999999999@s.whatsapp.net'
+            }
+        }
+    })
+    assert.equal('participant' in groupAckWithoutParticipant.attrs, false)
+
+    const groupAckWithParticipant = buildAckNode({
+        kind: 'notification',
+        node: {
+            tag: 'notification',
+            attrs: {
+                from: '12345@g.us',
+                type: 'w:gp2',
+                id: 'ack-3',
+                participant: '5511999999999@s.whatsapp.net'
+            }
+        },
+        includeParticipant: true
+    })
+    assert.equal(groupAckWithParticipant.attrs.participant, '5511999999999@s.whatsapp.net')
+
+    const iqResultWithId = buildIqResultNode({
+        tag: 'iq',
+        attrs: { id: 'iq-1', from: 's.whatsapp.net' }
+    })
+    assert.equal(iqResultWithId.attrs.id, 'iq-1')
+    assert.equal(iqResultWithId.attrs.type, 'result')
+
+    const iqResultWithoutId = buildIqResultNode({
+        tag: 'iq',
+        attrs: {}
+    })
+    assert.equal(iqResultWithoutId.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal('id' in iqResultWithoutId.attrs, false)
+})
+
+test('retry builder emits registration and key bundle payload', () => {
+    const node = buildRetryReceiptNode({
+        stanzaId: 'stanza-1',
+        to: '5511@s.whatsapp.net',
+        originalMsgId: 'msg-1',
+        retryCount: 1,
+        t: '100',
+        registrationId: 321,
+        keys: {
+            identity: new Uint8Array(32),
+            key: {
+                id: 7,
+                publicKey: new Uint8Array(32).fill(1)
+            },
+            skey: {
+                id: 8,
+                publicKey: new Uint8Array(32).fill(2),
+                signature: new Uint8Array(64).fill(3)
+            },
+            deviceIdentity: new Uint8Array([1, 2, 3])
+        }
+    })
+
+    assert.equal(node.tag, 'receipt')
+    assert.equal(node.attrs.type, 'retry')
+    assert.ok(Array.isArray(node.content))
+    assert.ok(node.content.some((child) => child.tag === WA_NODE_TAGS.REGISTRATION))
+    assert.ok(node.content.some((child) => child.tag === 'keys'))
+    assert.equal(node.content[0].attrs.error, '0')
+
+    const nodeWithoutKeys = buildRetryReceiptNode({
+        stanzaId: 'stanza-2',
+        to: '5511@s.whatsapp.net',
+        originalMsgId: 'msg-2',
+        retryCount: 2,
+        t: '200',
+        registrationId: 777,
+        participant: '5511:2@s.whatsapp.net',
+        recipient: '5511:3@s.whatsapp.net',
+        error: 409,
+        categoryPeer: true
+    })
+    assert.equal(nodeWithoutKeys.attrs.participant, '5511:2@s.whatsapp.net')
+    assert.equal(nodeWithoutKeys.attrs.recipient, '5511:3@s.whatsapp.net')
+    assert.equal(nodeWithoutKeys.attrs.category, 'peer')
+    assert.ok(Array.isArray(nodeWithoutKeys.content))
+    assert.equal(
+        nodeWithoutKeys.content.some((child) => child.tag === 'keys'),
+        false
+    )
+    assert.equal(nodeWithoutKeys.content[0].attrs.error, '409')
+})
+
+test('receipt builders support outbound list and server-error payloads', () => {
+    const aggregate = buildReceiptNode({
+        kind: 'outbound',
+        id: 'r-1',
+        to: '5511@s.whatsapp.net',
+        type: 'read',
+        participant: '5511:2@s.whatsapp.net',
+        recipient: '5511@s.whatsapp.net',
+        t: '1000',
+        peerParticipantPn: '5511888888888@s.whatsapp.net',
+        listIds: ['r-1', 'r-2', 'r-3']
+    })
+    assert.equal(aggregate.attrs.type, 'read')
+    assert.equal(aggregate.attrs.participant, '5511:2@s.whatsapp.net')
+    assert.equal(aggregate.attrs.recipient, '5511@s.whatsapp.net')
+    assert.equal(aggregate.attrs.t, '1000')
+    assert.equal(aggregate.attrs.peer_participant_pn, '5511888888888@s.whatsapp.net')
+    assert.ok(Array.isArray(aggregate.content))
+    if (!Array.isArray(aggregate.content)) {
+        throw new Error('expected aggregate receipt content array')
+    }
+    assert.equal(aggregate.content[0].tag, WA_NODE_TAGS.LIST)
+    assert.ok(Array.isArray(aggregate.content[0].content))
+    assert.equal(aggregate.content[0].content.length, 2)
+    assert.equal(aggregate.content[0].content[1].attrs.id, 'r-3')
+
+    const serverError = buildReceiptNode({
+        kind: 'server_error',
+        id: 'srv-1',
+        to: '5511@s.whatsapp.net',
+        categoryPeer: true,
+        encryptCiphertext: new Uint8Array([1, 2]),
+        encryptIv: new Uint8Array([3, 4]),
+        rmrJid: '5511999999999@s.whatsapp.net',
+        rmrFromMe: true,
+        rmrParticipant: '5511:2@s.whatsapp.net'
+    })
+    assert.equal(serverError.attrs.type, 'server-error')
+    assert.equal(serverError.attrs.category, 'peer')
+    assert.ok(Array.isArray(serverError.content))
+    if (!Array.isArray(serverError.content)) {
+        throw new Error('expected server-error receipt content array')
+    }
+    assert.equal(serverError.content[0].tag, 'encrypt')
+    assert.equal(serverError.content[1].tag, 'rmr')
+    assert.equal(serverError.content[1].attrs.from_me, 'true')
+    assert.equal(serverError.content[1].attrs.jid, '5511999999999@s.whatsapp.net')
+})
+
+test('prekeys builders include expected key material and targets', () => {
+    const registrationInfo = {
+        registrationId: 100,
+        identityKeyPair: {
+            pubKey: new Uint8Array(32).fill(1),
+            privKey: new Uint8Array(32).fill(2)
+        }
+    }
+    const signedPreKey = {
+        keyId: 9,
+        keyPair: {
+            pubKey: new Uint8Array(32).fill(3),
+            privKey: new Uint8Array(32).fill(4)
+        },
+        signature: new Uint8Array(64).fill(5),
+        uploaded: false
+    }
+
+    const upload = buildPreKeyUploadIq(registrationInfo, signedPreKey, [
+        {
+            keyId: 11,
+            keyPair: {
+                pubKey: new Uint8Array(32).fill(7),
+                privKey: new Uint8Array(32).fill(8)
+            },
+            uploaded: false
+        }
+    ])
+
+    assert.equal(upload.tag, 'iq')
+    assert.equal(upload.attrs.type, 'set')
+    assert.ok(Array.isArray(upload.content))
+    assert.notEqual(upload.content[0].tag, 'op')
+
+    const uploadMobile = buildPreKeyUploadIq(registrationInfo, signedPreKey, [
+        {
+            keyId: 12,
+            keyPair: {
+                pubKey: new Uint8Array(32).fill(7),
+                privKey: new Uint8Array(32).fill(8)
+            },
+            uploaded: false
+        }
+    ])
+    assert.ok(Array.isArray(uploadMobile.content))
+
+    const fetch = buildMissingPreKeysFetchIq([
+        {
+            userJid: '5511@s.whatsapp.net',
+            reasonIdentity: true,
+            devices: [{ deviceId: 2, registrationId: 123 }]
+        },
+        {
+            userJid: '5512@s.whatsapp.net',
+            devices: [{ deviceId: 3, registrationId: 124 }]
+        }
+    ])
+    assert.equal(fetch.attrs.type, 'get')
+    assert.ok(Array.isArray(fetch.content))
+
+    const rotate = buildSignedPreKeyRotateIq(signedPreKey)
+    assert.equal(rotate.attrs.type, 'set')
+    assert.ok(Array.isArray(rotate.content))
+    assert.equal(rotate.content[0].tag, WA_NODE_TAGS.ROTATE)
+})
+
+test('message builders include edit mediatype and meta node when provided', () => {
+    const participant = {
+        jid: '5511:0@s.whatsapp.net',
+        encType: 'msg' as const,
+        ciphertext: new Uint8Array([1])
+    }
+    const meta = buildMetaNode({ polltype: 'creation' })
+    assert.equal(meta.tag, 'meta')
+    assert.equal(meta.attrs.polltype, 'creation')
+
+    const direct = buildDirectMessageFanoutNode({
+        to: '5511@s.whatsapp.net',
+        type: 'poll',
+        id: 'p1',
+        edit: '7',
+        participants: [participant],
+        customNodes: [meta],
+        mediatype: 'image'
+    })
+    assert.equal(direct.attrs.edit, '7')
+    assert.ok(Array.isArray(direct.content))
+    const metaChild = direct.content.find((c) => c.tag === 'meta')
+    assert.ok(metaChild)
+    assert.equal(metaChild?.attrs.polltype, 'creation')
+    const encChild = Array.isArray(direct.content[0].content)
+        ? direct.content[0].content[0].content?.[0]
+        : null
+    assert.equal(encChild?.attrs.mediatype, 'image')
+
+    const group = buildGroupSenderKeyMessageNode({
+        to: '123@g.us',
+        type: 'media',
+        id: 'g1',
+        edit: '1',
+        groupCiphertext: new Uint8Array([2]),
+        participants: [participant],
+        customNodes: [buildMetaNode({ event_type: 'creation' })],
+        mediatype: 'video'
+    })
+    assert.equal(group.attrs.edit, '1')
+    assert.ok(Array.isArray(group.content))
+    const groupMeta = group.content.find((c) => c.tag === 'meta')
+    assert.ok(groupMeta)
+    assert.equal(groupMeta?.attrs.event_type, 'creation')
+    const skmsgEnc = group.content.find((c) => c.tag === 'enc' && c.attrs.type === 'skmsg')
+    assert.equal(skmsgEnc?.attrs.mediatype, 'video')
+
+    const retry = buildGroupRetryMessageNode({
+        to: '123@g.us',
+        type: 'media',
+        id: 'r1',
+        requesterJid: '5511:0@s.whatsapp.net',
+        addressingMode: 'pn',
+        encType: 'msg',
+        ciphertext: new Uint8Array([3]),
+        retryCount: 1,
+        mediatype: 'document'
+    })
+    assert.ok(Array.isArray(retry.content))
+    assert.equal(retry.content[0].attrs.mediatype, 'document')
+})
+
+test('email builders produce account namespace iq stanzas', () => {
+    const get = buildGetEmailIq()
+    assert.equal(get.attrs.type, 'get')
+    assert.equal(get.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal(get.attrs.xmlns, WA_EMAIL_XMLNS)
+    assert.ok(Array.isArray(get.content))
+    assert.equal(get.content[0].tag, WA_EMAIL_TAGS.EMAIL)
+    assert.equal(get.content[0].content, undefined)
+
+    const setNoCtx = buildSetEmailIq('foo@bar.com')
+    assert.equal(setNoCtx.attrs.type, 'set')
+    assert.equal(setNoCtx.attrs.xmlns, WA_EMAIL_XMLNS)
+    assert.ok(Array.isArray(setNoCtx.content))
+    const setEmailNode = setNoCtx.content[0]
+    assert.equal(setEmailNode.tag, WA_EMAIL_TAGS.EMAIL)
+    assert.ok(Array.isArray(setEmailNode.content))
+    assert.equal(setEmailNode.content.length, 1)
+    assert.equal(setEmailNode.content[0].tag, WA_EMAIL_TAGS.EMAIL_ADDRESS)
+    assert.equal(setEmailNode.content[0].content, 'foo@bar.com')
+
+    const setWithCtx = buildSetEmailIq('a@b.co', WA_EMAIL_CONTEXTS.ONBOARDING)
+    assert.ok(Array.isArray(setWithCtx.content))
+    assert.ok(Array.isArray(setWithCtx.content[0].content))
+    const ctxChildren = setWithCtx.content[0].content
+    assert.equal(ctxChildren.length, 2)
+    assert.equal(ctxChildren[0].tag, WA_EMAIL_TAGS.CONTEXT)
+    assert.equal(ctxChildren[0].content, 'onboarding')
+    assert.equal(ctxChildren[1].tag, WA_EMAIL_TAGS.EMAIL_ADDRESS)
+
+    assert.throws(() => buildSetEmailIq(''), /email length must be between/)
+    assert.throws(() => buildSetEmailIq('x'.repeat(321)), /email length must be between/)
+
+    const requestCode = buildRequestEmailVerificationCodeIq({
+        languageCode: 'pt',
+        localeCode: 'BR'
+    })
+    assert.equal(requestCode.attrs.type, 'set')
+    assert.ok(Array.isArray(requestCode.content))
+    const verifyEmail = requestCode.content[0]
+    assert.equal(verifyEmail.tag, WA_EMAIL_TAGS.VERIFY_EMAIL)
+    assert.ok(Array.isArray(verifyEmail.content))
+    assert.equal(verifyEmail.content[0].tag, WA_EMAIL_TAGS.LG)
+    assert.equal(verifyEmail.content[0].content, 'pt')
+    assert.equal(verifyEmail.content[1].tag, WA_EMAIL_TAGS.LC)
+    assert.equal(verifyEmail.content[1].content, 'BR')
+
+    assert.throws(
+        () => buildRequestEmailVerificationCodeIq({ languageCode: 'p', localeCode: 'BR' }),
+        /languageCode/
+    )
+    assert.throws(
+        () => buildRequestEmailVerificationCodeIq({ languageCode: 'pt', localeCode: 'BRAA' }),
+        /localeCode/
+    )
+
+    const verify = buildVerifyEmailCodeIq('123456')
+    assert.equal(verify.attrs.type, 'set')
+    assert.ok(Array.isArray(verify.content))
+    const verifyChild = verify.content[0]
+    assert.equal(verifyChild.tag, WA_EMAIL_TAGS.VERIFY_EMAIL)
+    assert.ok(Array.isArray(verifyChild.content))
+    assert.equal(verifyChild.content[0].tag, WA_EMAIL_TAGS.CODE)
+    assert.equal(verifyChild.content[0].content, '123456')
+
+    assert.throws(() => buildVerifyEmailCodeIq('12345'), /6 chars/)
+
+    const confirmNoCtx = buildConfirmEmailIq()
+    assert.equal(confirmNoCtx.attrs.type, 'set')
+    assert.ok(Array.isArray(confirmNoCtx.content))
+    assert.equal(confirmNoCtx.content[0].tag, WA_EMAIL_TAGS.CONFIRM_EMAIL)
+    assert.equal(confirmNoCtx.content[0].content, undefined)
+
+    const confirmWithCtx = buildConfirmEmailIq(WA_EMAIL_CONTEXTS.SETTINGS)
+    assert.ok(Array.isArray(confirmWithCtx.content))
+    assert.ok(Array.isArray(confirmWithCtx.content[0].content))
+    assert.equal(confirmWithCtx.content[0].content[0].tag, WA_EMAIL_TAGS.CONTEXT)
+    assert.equal(confirmWithCtx.content[0].content[0].content, 'settings')
+})
+
+test('buildNewsletterMessageNode covers every message kind variant', async () => {
+    const { buildNewsletterMessageNode, buildNewsletterViewReceiptNode } =
+        await import('@transport/node/builders/newsletter')
+    const to = '120363025343298869@newsletter'
+
+    const text = buildNewsletterMessageNode({
+        kind: 'text',
+        to,
+        id: 'S1',
+        plaintext: new Uint8Array([1, 2, 3])
+    })
+    assert.equal(text.attrs.type, 'text')
+    assert.equal(text.attrs.id, 'S1')
+    assert.ok(Array.isArray(text.content))
+    assert.equal(text.content[0].tag, WA_NODE_TAGS.PLAINTEXT)
+    assert.deepEqual(text.content[0].content, new Uint8Array([1, 2, 3]))
+
+    const media = buildNewsletterMessageNode({
+        kind: 'media',
+        to,
+        id: 'S2',
+        plaintext: new Uint8Array([9]),
+        mediaType: 'image'
+    })
+    assert.equal(media.attrs.type, 'media')
+    assert.ok(Array.isArray(media.content))
+    assert.equal(media.content[0].attrs.mediatype, 'image')
+
+    const editText = buildNewsletterMessageNode({
+        kind: 'edit-text',
+        to,
+        parentMessageId: 'PARENT1',
+        plaintext: new Uint8Array([1])
+    })
+    assert.equal(editText.attrs.id, 'PARENT1')
+    assert.equal(editText.attrs.edit, '3')
+    assert.equal(editText.attrs.type, 'text')
+
+    const editMedia = buildNewsletterMessageNode({
+        kind: 'edit-media',
+        to,
+        parentMessageId: 'PARENT2',
+        plaintext: new Uint8Array([2]),
+        mediaType: 'image'
+    })
+    assert.equal(editMedia.attrs.edit, '3')
+    assert.equal(editMedia.attrs.type, 'media')
+
+    const reaction = buildNewsletterMessageNode({
+        kind: 'reaction',
+        to,
+        id: 'S3',
+        parentMessageServerId: 99,
+        reactionCode: '1f44d'
+    })
+    assert.equal(reaction.attrs.type, 'reaction')
+    assert.equal(reaction.attrs.server_id, '99')
+    assert.ok(Array.isArray(reaction.content))
+    assert.equal(reaction.content[0].tag, 'reaction')
+    assert.equal(reaction.content[0].attrs.code, '1f44d')
+
+    const revoke = buildNewsletterMessageNode({
+        kind: 'revoke',
+        to,
+        originalMessageId: 'ORIG-MSG-1'
+    })
+    assert.equal(revoke.attrs.id, 'ORIG-MSG-1')
+    assert.equal(revoke.attrs.type, 'text')
+    assert.equal(revoke.attrs.edit, '8')
+    assert.equal(revoke.attrs.server_id, undefined)
+    assert.ok(Array.isArray(revoke.content))
+    assert.equal(revoke.content[0].tag, 'plaintext')
+    assert.equal(revoke.content[0].content, undefined)
+
+    const pollCreate = buildNewsletterMessageNode({
+        kind: 'poll-creation',
+        to,
+        id: 'PC1',
+        plaintext: new Uint8Array([3])
+    })
+    assert.equal(pollCreate.attrs.type, 'poll')
+    assert.ok(Array.isArray(pollCreate.content))
+    assert.equal(pollCreate.content[0].tag, 'plaintext')
+    assert.equal(pollCreate.content[1].attrs.polltype, 'creation')
+
+    const pollVote = buildNewsletterMessageNode({
+        kind: 'poll-vote',
+        to,
+        id: 'PV1',
+        parentMessageServerId: 99,
+        votes: [new Uint8Array([1, 1]), new Uint8Array([2, 2])]
+    })
+    assert.equal(pollVote.attrs.server_id, '99')
+    assert.ok(Array.isArray(pollVote.content))
+    assert.equal(pollVote.content[0].tag, 'votes')
+    assert.ok(Array.isArray(pollVote.content[0].content))
+    assert.equal(pollVote.content[0].content.length, 2)
+    assert.equal(pollVote.content[1].tag, 'meta')
+    assert.equal(pollVote.content[1].attrs.polltype, 'vote')
+
+    assert.throws(
+        () =>
+            buildNewsletterMessageNode({
+                kind: 'poll-vote',
+                to,
+                id: 'PVERR',
+                parentMessageServerId: 1,
+                votes: []
+            }),
+        /at least one vote/
+    )
+
+    const receipt = buildNewsletterViewReceiptNode({
+        to,
+        id: 'R1',
+        itemServerIds: [10, 20]
+    })
+    assert.equal(receipt.attrs.type, 'view')
+    assert.ok(Array.isArray(receipt.content))
+    assert.equal(receipt.content[0].tag, 'list')
+    assert.ok(Array.isArray(receipt.content[0].content))
+    assert.equal(receipt.content[0].content.length, 2)
+    assert.equal(receipt.content[0].content[0].attrs.server_id, '10')
+    assert.throws(
+        () =>
+            buildNewsletterViewReceiptNode({
+                to,
+                id: 'R2',
+                itemServerIds: []
+            }),
+        /at least one item/
+    )
+})
+
+test('buildNewsletterMessageNode merges additionalAttributes (user-wins)', async () => {
+    const { buildNewsletterMessageNode } = await import('@transport/node/builders/newsletter')
+    const to = '120363@newsletter'
+
+    const text = buildNewsletterMessageNode({
+        kind: 'text',
+        to,
+        id: 'S1',
+        plaintext: new Uint8Array([1]),
+        additionalAttributes: { category: 'peer', type: 'media' }
+    })
+    assert.equal(text.attrs.to, to)
+    assert.equal(text.attrs.id, 'S1')
+    assert.equal(text.attrs.category, 'peer')
+    assert.equal(text.attrs.type, 'media')
+
+    const media = buildNewsletterMessageNode({
+        kind: 'media',
+        to,
+        id: 'S2',
+        plaintext: new Uint8Array([2]),
+        mediaType: 'image',
+        additionalAttributes: { push_priority: 'high' }
+    })
+    assert.equal(media.attrs.push_priority, 'high')
+    assert.equal(media.attrs.type, 'media')
+})
+
+test('newsletter fetch IQs build the right history/update stanzas', async () => {
+    const { buildNewsletterMessagesIq, buildNewsletterMessageUpdatesIq } =
+        await import('@transport/node/builders/newsletter')
+
+    const fetchMessages = buildNewsletterMessagesIq({
+        newsletterJid: '120363025343298869@newsletter',
+        count: 50,
+        before: 1234
+    })
+    assert.equal(fetchMessages.attrs.type, 'get')
+    assert.equal(fetchMessages.attrs.xmlns, 'newsletter')
+    assert.ok(Array.isArray(fetchMessages.content))
+    assert.equal(fetchMessages.content[0].tag, 'messages')
+    assert.equal(fetchMessages.content[0].attrs.jid, '120363025343298869@newsletter')
+    assert.equal(fetchMessages.content[0].attrs.count, '50')
+    assert.equal(fetchMessages.content[0].attrs.before, '1234')
+
+    const fetchUpdates = buildNewsletterMessageUpdatesIq({
+        newsletterJid: '120363025343298869@newsletter',
+        count: 100,
+        since: 1700000000,
+        after: 50
+    })
+    assert.ok(Array.isArray(fetchUpdates.content))
+    assert.equal(fetchUpdates.content[0].tag, 'message_updates')
+    assert.equal(fetchUpdates.content[0].attrs.since, '1700000000')
+    assert.equal(fetchUpdates.content[0].attrs.after, '50')
+
+    assert.throws(
+        () =>
+            buildNewsletterMessageUpdatesIq({
+                newsletterJid: '120363025343298869@newsletter',
+                count: 100,
+                since: 1700000000
+            }),
+        /before or after/
+    )
+})
+
+test('group sender key message attaches a <bot> sidecar after <meta> for bot mentions', () => {
+    const participant = {
+        jid: '5511999999999:2@lid',
+        encType: 'msg' as const,
+        ciphertext: new Uint8Array([1, 2, 3])
+    }
+    const botSidecar = {
+        jid: '867051314767696@bot',
+        encType: 'pkmsg' as const,
+        ciphertext: new Uint8Array([4, 5, 6])
+    }
+    const metaNode = { tag: 'meta', attrs: { foo: 'bar' } }
+
+    const node = buildGroupSenderKeyMessageNode({
+        to: '123@g.us',
+        type: 'text',
+        id: 'g1',
+        phash: 'ph',
+        addressingMode: 'lid',
+        groupCiphertext: new Uint8Array([9, 9, 9]),
+        participants: [participant],
+        botParticipants: [botSidecar],
+        customNodes: [metaNode]
+    })
+
+    const content = node.content as readonly BinaryNode[]
+    const tags = content.map((c) => c.tag)
+    const skmsgIndex = tags.indexOf(WA_MESSAGE_TAGS.ENC)
+    const metaIndex = tags.indexOf('meta')
+    const botIndex = tags.indexOf(WA_NODE_TAGS.BOT)
+    assert.ok(skmsgIndex >= 0 && metaIndex > skmsgIndex && botIndex > metaIndex)
+    const botEnvelope = content[botIndex]
+    assert.ok(Array.isArray(botEnvelope.content))
+    const botTo = botEnvelope.content[0]
+    assert.equal(botTo.tag, 'to')
+    assert.equal(botTo.attrs.jid, '867051314767696@bot')
+})
+
+test('bot list builder targets s.whatsapp.net with xmlns="bot"', () => {
+    const node = buildBotListIq()
+    assert.equal(node.tag, WA_NODE_TAGS.IQ)
+    assert.equal(node.attrs.type, 'get')
+    assert.equal(node.attrs.to, WA_DEFAULTS.HOST_DOMAIN)
+    assert.equal(node.attrs.xmlns, 'bot')
+    assert.ok(Array.isArray(node.content))
+    assert.equal(node.content[0].tag, 'bot')
+    assert.equal(node.content[0].attrs.v, '2')
+
+    const v3 = buildBotListIq('3')
+    assert.ok(Array.isArray(v3.content))
+    assert.equal(v3.content[0].attrs.v, '3')
+})
+
+test('buildEditBusinessProfileIq encodes business hours and rejects unknown mode', () => {
+    const iq = buildEditBusinessProfileIq({
+        businessHours: {
+            timezone: 'America/Sao_Paulo',
+            config: [
+                { dayOfWeek: 'mon', mode: 'specific_hours', openTime: 540, closeTime: 1080 },
+                { dayOfWeek: 'tue', mode: 'open_24h', openTime: 0, closeTime: 1440 },
+                { dayOfWeek: 'wed', mode: 'appointment_only' }
+            ]
+        }
+    })
+    const profile = (iq.content as readonly BinaryNode[])[0]
+    assert.equal(profile.tag, 'business_profile')
+    assert.equal(profile.attrs.mutation_type, 'delta')
+    const hours = (profile.content as readonly BinaryNode[]).find((c) => c.tag === 'business_hours')
+    assert.ok(hours)
+    assert.equal(hours.attrs.timezone, 'America/Sao_Paulo')
+    const configs = hours.content as readonly BinaryNode[]
+    assert.equal(configs.length, 3)
+    // specific_hours keeps open/close
+    assert.equal(configs[0].attrs.mode, WA_BUSINESS_HOURS_MODES.SPECIFIC_HOURS)
+    assert.equal(configs[0].attrs.open_time, '540')
+    assert.equal(configs[0].attrs.close_time, '1080')
+    // open_24h drops open/close even when supplied
+    assert.equal(configs[1].attrs.mode, WA_BUSINESS_HOURS_MODES.OPEN_24H)
+    assert.equal(configs[1].attrs.open_time, undefined)
+    assert.equal(configs[1].attrs.close_time, undefined)
+    // appointment_only carries no times
+    assert.equal(configs[2].attrs.mode, WA_BUSINESS_HOURS_MODES.APPOINTMENT_ONLY)
+    assert.equal(configs[2].attrs.open_time, undefined)
+
+    assert.throws(
+        () =>
+            buildEditBusinessProfileIq({
+                businessHours: { config: [{ dayOfWeek: 'sun', mode: 'open' as never }] }
+            }),
+        /invalid business hours mode/
+    )
+})
+
+test('username lookup usync builds a jid-less user with the contact identifier', () => {
+    const queryNodes = buildUsernameLookupUsyncQueryNodes()
+    assert.deepEqual(
+        queryNodes.map((node) => node.tag),
+        ['contact', 'business']
+    )
+    assert.equal(queryNodes[0].attrs.addressing_mode, 'lid')
+
+    const iq = buildUsyncIq({
+        sid: 'sid-1',
+        queryProtocolNodes: queryNodes,
+        users: [
+            {
+                content: [
+                    buildUsernameLookupContactNode({
+                        username: 'joao',
+                        usernameKey: '1234'
+                    })
+                ]
+            }
+        ]
+    })
+    const usyncNode = findNodeChild(iq, 'usync')
+    const listNode = usyncNode ? findNodeChild(usyncNode, 'list') : undefined
+    assert.ok(listNode && Array.isArray(listNode.content))
+    if (!listNode || !Array.isArray(listNode.content)) {
+        throw new Error('expected usync list content array')
+    }
+    const userNode = listNode.content[0]
+    assert.equal(userNode.attrs.jid, undefined)
+    if (!Array.isArray(userNode.content)) {
+        throw new Error('expected user content array')
+    }
+    assert.deepEqual(userNode.content[0], {
+        tag: 'contact',
+        attrs: { username: 'joao', pin: '1234' }
+    })
+
+    const withoutKey = buildUsernameLookupContactNode({ username: 'joao' })
+    assert.deepEqual(withoutKey.attrs, { username: 'joao' })
+})
+
+test('blocklist block picks one identifier per wa-web precedence', () => {
+    const readItemAttrs = (node: { content?: unknown }): Record<string, string> => {
+        if (!Array.isArray(node.content)) {
+            throw new Error('expected blocklist item content array')
+        }
+        return node.content[0].attrs
+    }
+
+    assert.deepEqual(
+        readItemAttrs(
+            buildBlocklistBlockIq({
+                lidJid: '88880000@lid',
+                pnJid: '5511999999999@s.whatsapp.net',
+                username: 'joao',
+                displayName: null
+            })
+        ),
+        { action: 'block', jid: '88880000@lid', username: 'joao' }
+    )
+    assert.deepEqual(
+        readItemAttrs(
+            buildBlocklistBlockIq({
+                lidJid: '88880000@lid',
+                pnJid: '5511999999999@s.whatsapp.net',
+                username: 'joao',
+                displayName: 'Joao'
+            })
+        ),
+        { action: 'block', jid: '88880000@lid', pn_jid: '5511999999999@s.whatsapp.net' }
+    )
+    assert.deepEqual(
+        readItemAttrs(
+            buildBlocklistBlockIq({ lidJid: '88880000@lid', pnJid: null, username: 'joao' })
+        ),
+        { action: 'block', jid: '88880000@lid', username: 'joao' }
+    )
+    assert.deepEqual(
+        readItemAttrs(
+            buildBlocklistBlockIq({
+                lidJid: '88880000@lid',
+                pnJid: null,
+                username: null,
+                displayName: 'Joao'
+            })
+        ),
+        { action: 'block', jid: '88880000@lid', display_name: 'Joao' }
+    )
+    assert.deepEqual(
+        readItemAttrs(buildBlocklistBlockIq({ lidJid: '88880000@lid', pnJid: null })),
+        { action: 'block', jid: '88880000@lid', unknown_identifier: 'true' }
+    )
+})
+
+test('disallowed-list entries prefer the username identifier under lid addressing', () => {
+    const iq = buildSetPrivacyDisallowedListIq(
+        WA_PRIVACY_CATEGORIES.LAST_SEEN,
+        [
+            {
+                action: 'add',
+                lidJid: '88880000@lid',
+                pnJid: '5511999999999@s.whatsapp.net',
+                username: 'joao'
+            },
+            { action: 'remove', lidJid: '88881111@lid', pnJid: null, username: null }
+        ],
+        'dhash-1',
+        true
+    )
+    const privacyNode = findNodeChild(iq, 'privacy')
+    const categoryNode = privacyNode ? findNodeChild(privacyNode, 'category') : undefined
+    if (!categoryNode || !Array.isArray(categoryNode.content)) {
+        throw new Error('expected category content array')
+    }
+    assert.deepEqual(categoryNode.content[0].attrs, {
+        action: 'add',
+        jid: '88880000@lid',
+        username: 'joao'
+    })
+    assert.deepEqual(categoryNode.content[1].attrs, {
+        action: 'remove',
+        jid: '88881111@lid'
+    })
+})

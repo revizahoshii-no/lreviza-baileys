@@ -1,0 +1,742 @@
+/** Registers the default IQ auto-handlers used by `FakeWaServer`. */
+
+import { buildAbPropsResult, type BuildAbPropsResultInput } from '../protocol/iq/abprops'
+import {
+    buildAppStateSyncFullResult,
+    buildAppStateSyncResult,
+    type FakeAppStateCollectionPayload,
+    parseAppStateSyncRequest
+} from '../protocol/iq/appstate-sync'
+import {
+    buildBusinessProfileResult,
+    type FakeBusinessProfile,
+    parseGetBusinessProfileIq
+} from '../protocol/iq/business'
+import {
+    type ParsedPairDeviceUpload,
+    parseKeyIndexListPublish,
+    parsePairDeviceUpload,
+    parseRemoveCompanionDevice
+} from '../protocol/iq/companion-host'
+import { parseClearDirtyBitsIq } from '../protocol/iq/dirty-bits'
+import {
+    buildGroupMetadataNode,
+    buildGroupParticipantChangeResult,
+    parseCreateGroupIq,
+    parseGroupParticipantChangeIq,
+    parseLeaveGroupIq,
+    parseSetDescriptionIq,
+    parseSetSubjectIq
+} from '../protocol/iq/group-ops'
+import { buildNewsletterMyAddonsResult } from '../protocol/iq/newsletter'
+import { buildPreKeyFetchResult, type PreKeyBundleForUser } from '../protocol/iq/prekey-fetch'
+import {
+    buildBlocklistResult,
+    buildPrivacyDisallowedListResult,
+    buildPrivacySettingsResult,
+    type FakePrivacyCategoryName,
+    type FakePrivacySettingsState,
+    parseBlocklistChangeIq,
+    parsePrivacyDisallowedListGetIq,
+    parsePrivacySetCategoryIq
+} from '../protocol/iq/privacy'
+import { type FakePrivacyTokenIssue, parsePrivacyTokenIssueIq } from '../protocol/iq/privacy-token'
+import {
+    buildGetProfilePictureResult,
+    buildSetProfilePictureResult,
+    type FakeProfilePictureResult,
+    parseGetProfilePictureIq,
+    parseSetProfilePictureIq,
+    parseSetStatusIq
+} from '../protocol/iq/profile'
+import {
+    buildIqError,
+    buildIqResult,
+    type WaFakeIqContext,
+    type WaFakeIqRouter
+} from '../protocol/iq/router'
+import { buildUsyncDevicesResult } from '../protocol/iq/usync'
+import { type ClientPreKeyBundle, parsePreKeyUploadIq } from '../protocol/signal/prekey-upload'
+import type { FakeMobilePrimaryIdentity } from '../state/fake-companion-host'
+import { type BinaryNode } from '../transport/codec'
+
+import type { FakePeer } from './FakePeer'
+import {
+    type CapturedBlocklistChange,
+    type CapturedDirtyBitsClear,
+    type CapturedGroupOp,
+    type CapturedPrivacySet,
+    type CapturedProfilePictureSet,
+    type MutableFakeGroup,
+    toUserJidPart
+} from './ServerRegistries'
+
+export interface IqHandlerDeps {
+    readonly peerRegistry: ReadonlyMap<string, FakePeer>
+    readonly groupRegistry: Map<string, MutableFakeGroup>
+    readonly privacySettings: FakePrivacySettingsState
+    readonly blocklistJids: Set<string>
+    readonly profilePicturesByJid: Map<string, FakeProfilePictureResult>
+    readonly businessProfilesByJid: Map<string, FakeBusinessProfile>
+    readonly abPropsInput: BuildAbPropsResultInput
+    readonly issuedPrivacyTokens: Map<string, FakePrivacyTokenIssue>
+    readonly latestStatusText: string | null
+    setLatestStatusText(text: string): void
+    lookupDeviceIdsForUser(userJid: string): readonly number[]
+    notifyGroupOp(op: CapturedGroupOp): void
+    mutatePrivacySettings(category: FakePrivacyCategoryName, value: string): void
+    mutateBlocklist(action: 'block' | 'unblock', jid: string): void
+    notifyProfilePictureSet(op: CapturedProfilePictureSet): void
+    handleProfilePictureSet(targetJid: string, newId: string): void
+    notifyStatusSet(text: string): void
+    notifyLogout(): void
+    notifyPrivacyTokenIssue(token: FakePrivacyTokenIssue): void
+    notifyDirtyBitsClear(op: CapturedDirtyBitsClear): void
+    notifyPrivacySet(change: CapturedPrivacySet): void
+    notifyBlocklistChange(change: CapturedBlocklistChange): void
+    capturePreKeyBundle(bundle: ClientPreKeyBundle): void
+    countServerPreKeys(): number
+    consumeOutboundAppStatePatches(iq: BinaryNode): Promise<void>
+    readonly appStateCollectionProviders: ReadonlyMap<
+        string,
+        () => Promise<FakeAppStateCollectionPayload | null> | FakeAppStateCollectionPayload | null
+    >
+    requireMediaHttpsInfo(): { readonly host: string; readonly port: number }
+    /** Mobile primary bound to this session, or `null` for a web session. */
+    readonly mobilePrimary: FakeMobilePrimaryIdentity | null
+    /**
+     * Completes the primary's `pair-device` upload. Resolves `null` when the
+     * session has no primary or the ref belongs to no live connection.
+     */
+    linkCompanionDevice(upload: ParsedPairDeviceUpload): Promise<LinkedCompanionResult | null>
+    /** Unlinks the given companions, or every one of them when passed `null`. */
+    revokeCompanionDevices(deviceJids: readonly string[] | null): readonly string[]
+    recordKeyIndexList(bytes: Uint8Array, timestampSeconds: number): void
+    /** Routes a link-code stage to the other client, or `null` to fall through. */
+    relayLinkCodeStage(
+        iq: BinaryNode,
+        context: WaFakeIqContext | undefined
+    ): Promise<BinaryNode | null>
+}
+
+export interface LinkedCompanionResult {
+    readonly deviceJid: string
+    readonly companionPropsBytes: Uint8Array | null
+}
+
+export function parseUsyncRequestedUserJids(iq: BinaryNode): readonly string[] {
+    if (!Array.isArray(iq.content)) return []
+    const out: string[] = []
+    for (const child of iq.content) {
+        if (child.tag !== 'usync') continue
+        if (!Array.isArray(child.content)) continue
+        for (const inner of child.content) {
+            if (inner.tag !== 'list') continue
+            if (!Array.isArray(inner.content)) continue
+            for (const userNode of inner.content) {
+                if (userNode.tag !== 'user') continue
+                if (typeof userNode.attrs.jid === 'string') {
+                    out.push(userNode.attrs.jid)
+                }
+            }
+        }
+    }
+    return out
+}
+
+export function parseRequestedKeyJids(iq: BinaryNode): readonly string[] {
+    if (!Array.isArray(iq.content)) return []
+    const out: string[] = []
+    for (const child of iq.content) {
+        if (child.tag !== 'key') continue
+        if (!Array.isArray(child.content)) continue
+        for (const userNode of child.content) {
+            if (userNode.tag !== 'user') continue
+            const jid = userNode.attrs.jid
+            if (jid) out.push(jid)
+        }
+    }
+    return out
+}
+
+function buildGroupMetadataReply(iq: BinaryNode, metadata: MutableFakeGroup): BinaryNode {
+    const result = buildIqResult(iq)
+    return {
+        ...result,
+        content: [
+            buildGroupMetadataNode({
+                groupJid: metadata.groupJid,
+                subject: metadata.subject,
+                creator: metadata.creator,
+                creationSeconds: metadata.creationSeconds,
+                participantJids: metadata.participants.map((peer) => toUserJidPart(peer.jid)),
+                ...(metadata.description !== undefined ? { description: metadata.description } : {})
+            })
+        ]
+    }
+}
+
+/**
+ * True when the stanza arrived on the phone that owns this session's account.
+ * Being a phone login is not enough: a second number connecting to the same
+ * session must not drive the companion set of the account that owns it.
+ */
+function isSessionOwnerConnection(
+    context: WaFakeIqContext | undefined,
+    deps: IqHandlerDeps
+): boolean {
+    const payload = context?.connection.clientPayload
+    if (payload?.kind !== 'login' || payload.flavor !== 'mobile') {
+        return false
+    }
+    return deps.mobilePrimary?.username === payload.username
+}
+
+/** The device jid a connection speaks for, or `null` before it logs in. */
+function ownDeviceJid(context: WaFakeIqContext | undefined): string | null {
+    const payload = context?.connection.clientPayload
+    if (payload?.kind !== 'login') {
+        return null
+    }
+    return payload.device > 0
+        ? `${payload.username}:${payload.device}@s.whatsapp.net`
+        : `${payload.username}@s.whatsapp.net`
+}
+
+export function registerDefaultIqHandlers(router: WaFakeIqRouter, deps: IqHandlerDeps): void {
+    router.register({
+        label: 'prekey-upload',
+        matcher: { xmlns: 'encrypt', type: 'set' },
+        respond: (iq) => {
+            try {
+                const bundle = parsePreKeyUploadIq(iq)
+                deps.capturePreKeyBundle(bundle)
+            } catch {
+                /* ignore */
+            }
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'signal-digest',
+        matcher: { xmlns: 'encrypt', type: 'get', childTag: 'digest' },
+        respond: (iq) => buildIqError(iq, { code: 404, text: 'item-not-found' })
+    })
+
+    // Baileys-family and whatsmeow clients block on this query before
+    // reporting the connection as open; @revizahoshii/hoshino uses <digest> instead.
+    router.register({
+        label: 'prekey-count',
+        matcher: { xmlns: 'encrypt', type: 'get', childTag: 'count' },
+        respond: (iq) => {
+            const result = buildIqResult(iq)
+            return {
+                ...result,
+                content: [
+                    {
+                        tag: 'count',
+                        attrs: { value: String(deps.countServerPreKeys()) }
+                    }
+                ]
+            }
+        }
+    })
+
+    router.register({
+        label: 'passive-mode',
+        matcher: { xmlns: 'passive', type: 'set' },
+        respond: (iq) => buildIqResult(iq)
+    })
+
+    router.register({
+        label: 'media-conn',
+        matcher: { xmlns: 'w:m', type: 'set', childTag: 'media_conn' },
+        respond: (iq) => {
+            const info = deps.requireMediaHttpsInfo()
+            const result = buildIqResult(iq)
+            return {
+                ...result,
+                attrs: { ...result.attrs, from: 's.whatsapp.net' },
+                content: [
+                    {
+                        tag: 'media_conn',
+                        attrs: { auth: 'fake-media-auth', ttl: '3600' },
+                        content: [
+                            {
+                                tag: 'host',
+                                attrs: {
+                                    hostname: `${info.host}:${info.port}`
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    })
+
+    router.register({
+        label: 'app-state-sync',
+        matcher: { xmlns: 'w:sync:app:state', type: 'set' },
+        respond: async (iq) => {
+            await deps.consumeOutboundAppStatePatches(iq)
+            if (deps.appStateCollectionProviders.size === 0) {
+                return buildAppStateSyncResult(iq)
+            }
+            const requests = parseAppStateSyncRequest(iq)
+            const payloads: FakeAppStateCollectionPayload[] = []
+            for (const request of requests) {
+                const provider = deps.appStateCollectionProviders.get(request.name)
+                if (!provider) continue
+                const payload = await provider()
+                if (payload) {
+                    payloads.push(payload)
+                }
+            }
+            return buildAppStateSyncFullResult(iq, { payloads })
+        }
+    })
+
+    router.register({
+        label: 'usync',
+        matcher: { xmlns: 'usync', type: 'get', childTag: 'usync' },
+        respond: (iq) => {
+            const requestedUserJids = parseUsyncRequestedUserJids(iq)
+            const results = requestedUserJids.map((userJid) => ({
+                userJid,
+                deviceIds: deps.lookupDeviceIdsForUser(userJid)
+            }))
+            return buildUsyncDevicesResult(iq, results)
+        }
+    })
+
+    router.register({
+        label: 'prekey-fetch',
+        matcher: { xmlns: 'encrypt', type: 'get', childTag: 'key' },
+        respond: (iq) => {
+            const requestedDeviceJids = parseRequestedKeyJids(iq)
+            const bundles: PreKeyBundleForUser[] = []
+            for (const deviceJid of requestedDeviceJids) {
+                const peer = deps.peerRegistry.get(deviceJid)
+                if (!peer) continue
+                const oneTime = peer.keyBundle.oneTimePreKeys[0]
+                bundles.push({
+                    userJid: deviceJid,
+                    registrationId: peer.keyBundle.registrationId,
+                    identityPublicKey: peer.keyBundle.identityKeyPair.pubKey,
+                    signedPreKey: {
+                        id: peer.keyBundle.signedPreKey.id,
+                        publicKey: peer.keyBundle.signedPreKey.keyPair.pubKey,
+                        signature: peer.keyBundle.signedPreKey.signature
+                    },
+                    ...(oneTime
+                        ? {
+                              oneTimePreKey: {
+                                  id: oneTime.id,
+                                  publicKey: oneTime.keyPair.pubKey
+                              }
+                          }
+                        : {})
+                })
+            }
+            return buildPreKeyFetchResult(iq, bundles)
+        }
+    })
+
+    router.register({
+        label: 'group-metadata',
+        matcher: { xmlns: 'w:g2', type: 'get', childTag: 'query' },
+        respond: (iq) => {
+            const groupJid = iq.attrs.to
+            if (!groupJid) {
+                return buildIqError(iq, { code: 400, text: 'missing-to' })
+            }
+            const metadata = deps.groupRegistry.get(groupJid)
+            if (!metadata) {
+                return buildIqError(iq, { code: 404, text: 'group-not-found' })
+            }
+            return buildGroupMetadataReply(iq, metadata)
+        }
+    })
+
+    router.register({
+        label: 'abprops',
+        matcher: { xmlns: 'abt', type: 'get', childTag: 'props' },
+        respond: (iq) => buildAbPropsResult(iq, deps.abPropsInput)
+    })
+
+    router.register({
+        label: 'whatsapp-ping',
+        matcher: { xmlns: 'w:p', type: 'get' },
+        respond: (iq) => buildIqResult(iq)
+    })
+
+    router.register({
+        label: 'xmpp-ping',
+        matcher: { xmlns: 'urn:xmpp:ping', type: 'get' },
+        respond: (iq) => buildIqResult(iq)
+    })
+
+    router.register({
+        label: 'signed-prekey-rotate',
+        matcher: { xmlns: 'encrypt', type: 'set', childTag: 'rotate' },
+        respond: (iq) => buildIqResult(iq)
+    })
+
+    router.register({
+        label: 'link-code-companion-reg',
+        matcher: { xmlns: 'md', type: 'set', childTag: 'link_code_companion_reg' },
+        respond: (iq, context) => deps.relayLinkCodeStage(iq, context)
+    })
+
+    router.register({
+        label: 'companion-pair-device',
+        matcher: { xmlns: 'md', type: 'set', childTag: 'pair-device' },
+        respond: async (iq, context) => {
+            const upload = parsePairDeviceUpload(iq)
+            if (!upload) {
+                return buildIqError(iq, { code: 400, text: 'invalid-pair-device' })
+            }
+            // The link is minted under the account that owns the session, so
+            // only that account's phone may ask for one.
+            if (!isSessionOwnerConnection(context, deps)) {
+                return buildIqError(iq, { code: 403, text: 'not-authorized' })
+            }
+            const linked = await deps.linkCompanionDevice(upload)
+            if (!linked) {
+                return buildIqError(iq, { code: 404, text: 'unknown-pairing-ref' })
+            }
+            // Shape mirrors the phone's parser: <device jid> is a direct child
+            // of the result, with the companion's own props beside it.
+            const content: BinaryNode[] = [{ tag: 'device', attrs: { jid: linked.deviceJid } }]
+            if (linked.companionPropsBytes) {
+                content.push({
+                    tag: 'companion-props',
+                    attrs: {},
+                    content: linked.companionPropsBytes
+                })
+            }
+            return buildIqResult(iq, { content })
+        }
+    })
+
+    router.register({
+        label: 'companion-key-index-list',
+        matcher: { xmlns: 'md', type: 'set', childTag: 'key-index-list' },
+        respond: (iq, context) => {
+            const published = parseKeyIndexListPublish(iq)
+            if (!published) {
+                return buildIqError(iq, { code: 400, text: 'invalid-key-index-list' })
+            }
+            if (!isSessionOwnerConnection(context, deps)) {
+                return buildIqError(iq, { code: 403, text: 'not-authorized' })
+            }
+            deps.recordKeyIndexList(published.keyIndexListBytes, published.timestampSeconds)
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'remove-companion-device',
+        matcher: { xmlns: 'md', type: 'set', childTag: 'remove-companion-device' },
+        respond: (iq, context) => {
+            const removal = parseRemoveCompanionDevice(iq)
+            // The same stanza means "log me out" from a companion and "unlink
+            // that device" from a primary. The wire does not say which, but the
+            // connection does: the account's own phone is always revoking
+            // someone else's device, and never ends its own session this way.
+            if (removal && isSessionOwnerConnection(context, deps)) {
+                if (!removal.all) {
+                    deps.revokeCompanionDevices(removal.deviceJid ? [removal.deviceJid] : [])
+                } else if (!removal.excludeHostedCompanion) {
+                    // The hosted set is exactly what this session tracks, so
+                    // sparing it leaves the registry untouched.
+                    deps.revokeCompanionDevices(null)
+                }
+                return buildIqResult(iq)
+            }
+            // Anyone else may only unlink itself: a connection that is not the
+            // account's phone must never drop someone else's device. Its own
+            // session ends either way.
+            if (removal?.deviceJid && removal.deviceJid === ownDeviceJid(context)) {
+                deps.revokeCompanionDevices([removal.deviceJid])
+            }
+            deps.notifyLogout()
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'group-create',
+        matcher: { xmlns: 'w:g2', type: 'set', childTag: 'create' },
+        respond: (iq) => {
+            const parsed = parseCreateGroupIq(iq)
+            if (!parsed) {
+                return buildIqError(iq, { code: 400, text: 'invalid-create' })
+            }
+            const groupJid = `120363${Date.now()}@g.us`
+            const creator = parsed.participantJids[0] ?? 's.whatsapp.net'
+            const creationSeconds = Math.floor(Date.now() / 1_000)
+            const participants: FakePeer[] = []
+            for (const jid of parsed.participantJids) {
+                const peer = deps.peerRegistry.get(jid)
+                if (peer) participants.push(peer)
+            }
+            const mutable: MutableFakeGroup = {
+                groupJid,
+                subject: parsed.subject,
+                description: parsed.description,
+                creator,
+                creationSeconds,
+                participants
+            }
+            deps.groupRegistry.set(groupJid, mutable)
+            deps.notifyGroupOp({
+                action: 'create',
+                groupJid,
+                subject: parsed.subject,
+                participantJids: parsed.participantJids,
+                description: parsed.description
+            })
+            const result = buildIqResult(iq)
+            return {
+                ...result,
+                content: [
+                    buildGroupMetadataNode({
+                        groupJid,
+                        subject: parsed.subject,
+                        creator,
+                        creationSeconds,
+                        participantJids: parsed.participantJids,
+                        description: parsed.description
+                    })
+                ]
+            }
+        }
+    })
+
+    for (const action of ['add', 'remove', 'promote', 'demote'] as const) {
+        router.register({
+            label: `group-${action}`,
+            matcher: { xmlns: 'w:g2', type: 'set', childTag: action },
+            respond: (iq) => {
+                const parsed = parseGroupParticipantChangeIq(iq)
+                if (!parsed) {
+                    return buildIqError(iq, { code: 400, text: 'invalid-change' })
+                }
+                const group = deps.groupRegistry.get(parsed.groupJid)
+                if (group) {
+                    if (parsed.action === 'add') {
+                        for (const jid of parsed.participantJids) {
+                            const peer = deps.peerRegistry.get(jid)
+                            if (peer && !group.participants.includes(peer)) {
+                                group.participants.push(peer)
+                            }
+                        }
+                    } else if (parsed.action === 'remove') {
+                        const removed = new Set(parsed.participantJids)
+                        group.participants = group.participants.filter(
+                            (peer) => !removed.has(peer.jid)
+                        )
+                    }
+                }
+                deps.notifyGroupOp({
+                    action: parsed.action,
+                    groupJid: parsed.groupJid,
+                    participantJids: parsed.participantJids
+                })
+                return buildGroupParticipantChangeResult(iq, parsed.action, parsed.participantJids)
+            }
+        })
+    }
+
+    router.register({
+        label: 'group-subject',
+        matcher: { xmlns: 'w:g2', type: 'set', childTag: 'subject' },
+        respond: (iq) => {
+            const parsed = parseSetSubjectIq(iq)
+            if (!parsed) return buildIqError(iq, { code: 400, text: 'invalid-subject' })
+            const group = deps.groupRegistry.get(parsed.groupJid)
+            if (group) group.subject = parsed.subject
+            deps.notifyGroupOp({
+                action: 'subject',
+                groupJid: parsed.groupJid,
+                subject: parsed.subject
+            })
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'group-description',
+        matcher: { xmlns: 'w:g2', type: 'set', childTag: 'description' },
+        respond: (iq) => {
+            const parsed = parseSetDescriptionIq(iq)
+            if (!parsed) return buildIqError(iq, { code: 400, text: 'invalid-description' })
+            const group = deps.groupRegistry.get(parsed.groupJid)
+            if (group) group.description = parsed.description ?? undefined
+            deps.notifyGroupOp({
+                action: 'description',
+                groupJid: parsed.groupJid,
+                description: parsed.description
+            })
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'group-leave',
+        matcher: { xmlns: 'w:g2', type: 'set', childTag: 'leave' },
+        respond: (iq) => {
+            const groupJids = parseLeaveGroupIq(iq) ?? []
+            for (const groupJid of groupJids) {
+                deps.groupRegistry.delete(groupJid)
+                deps.notifyGroupOp({ action: 'leave', groupJid })
+            }
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'privacy-get',
+        matcher: { xmlns: 'privacy', type: 'get', childTag: 'privacy' },
+        respond: (iq) => {
+            const disallowedCategory = parsePrivacyDisallowedListGetIq(iq)
+            if (disallowedCategory) {
+                return buildPrivacyDisallowedListResult(
+                    iq,
+                    disallowedCategory,
+                    deps.privacySettings.disallowed[disallowedCategory] ?? []
+                )
+            }
+            return buildPrivacySettingsResult(iq, deps.privacySettings)
+        }
+    })
+
+    router.register({
+        label: 'privacy-set',
+        matcher: { xmlns: 'privacy', type: 'set', childTag: 'privacy' },
+        respond: (iq) => {
+            const change = parsePrivacySetCategoryIq(iq)
+            if (!change) return buildIqError(iq, { code: 400, text: 'invalid-privacy-set' })
+            deps.mutatePrivacySettings(change.category, change.value)
+            deps.notifyPrivacySet(change)
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'blocklist-get',
+        matcher: { xmlns: 'blocklist', type: 'get' },
+        respond: (iq) => buildBlocklistResult(iq, [...deps.blocklistJids])
+    })
+
+    router.register({
+        label: 'blocklist-set',
+        matcher: { xmlns: 'blocklist', type: 'set' },
+        respond: (iq) => {
+            const change = parseBlocklistChangeIq(iq)
+            if (!change) {
+                return buildIqError(iq, { code: 400, text: 'invalid-blocklist-set' })
+            }
+            deps.mutateBlocklist(change.action, change.jid)
+            deps.notifyBlocklistChange(change)
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'privacy-token-issue',
+        matcher: { xmlns: 'privacy', type: 'set', childTag: 'tokens' },
+        respond: (iq) => {
+            const tokens = parsePrivacyTokenIssueIq(iq)
+            if (tokens) {
+                for (const token of tokens) {
+                    deps.issuedPrivacyTokens.set(token.jid, token)
+                    deps.notifyPrivacyTokenIssue(token)
+                }
+            }
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'newsletter-my-addons',
+        matcher: { xmlns: 'newsletter', type: 'get', childTag: 'my_addons' },
+        respond: (iq) => buildNewsletterMyAddonsResult(iq)
+    })
+
+    router.register({
+        label: 'dirty-bits-clear',
+        matcher: { xmlns: 'urn:xmpp:whatsapp:dirty', type: 'set' },
+        respond: (iq) => {
+            const bits = parseClearDirtyBitsIq(iq)
+            if (bits) {
+                deps.notifyDirtyBitsClear({ bits })
+            }
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'profile-picture-get',
+        matcher: { xmlns: 'w:profile:picture', type: 'get' },
+        respond: (iq) => {
+            const parsed = parseGetProfilePictureIq(iq)
+            if (!parsed) return buildIqError(iq, { code: 400, text: 'invalid-target' })
+            const picture = deps.profilePicturesByJid.get(parsed.targetJid)
+            if (!picture) {
+                return buildIqError(iq, { code: 404, text: 'item-not-found' })
+            }
+            return buildGetProfilePictureResult(iq, { ...picture, type: parsed.type })
+        }
+    })
+
+    router.register({
+        label: 'profile-picture-set',
+        matcher: { xmlns: 'w:profile:picture', type: 'set' },
+        respond: (iq) => {
+            const parsed = parseSetProfilePictureIq(iq)
+            if (!parsed) return buildIqError(iq, { code: 400, text: 'invalid-set' })
+            const targetJid = parsed.targetJid ?? 'me'
+            const newId = `${Date.now()}`
+            deps.handleProfilePictureSet(targetJid, newId)
+            deps.notifyProfilePictureSet(parsed)
+            return buildSetProfilePictureResult(iq, newId)
+        }
+    })
+
+    router.register({
+        label: 'status-set',
+        matcher: { xmlns: 'status', type: 'set' },
+        respond: (iq) => {
+            const parsed = parseSetStatusIq(iq)
+            if (parsed) {
+                deps.setLatestStatusText(parsed.text)
+                deps.notifyStatusSet(parsed.text)
+            }
+            return buildIqResult(iq)
+        }
+    })
+
+    router.register({
+        label: 'business-profile-get',
+        matcher: { xmlns: 'w:biz', type: 'get', childTag: 'business_profile' },
+        respond: (iq) => {
+            const requestedJids = parseGetBusinessProfileIq(iq) ?? []
+            const profiles: FakeBusinessProfile[] = []
+            for (const jid of requestedJids) {
+                const profile = deps.businessProfilesByJid.get(jid)
+                if (profile) profiles.push(profile)
+            }
+            return buildBusinessProfileResult(iq, profiles)
+        }
+    })
+
+    router.register({
+        label: 'business-profile-set',
+        matcher: { xmlns: 'w:biz', type: 'set', childTag: 'business_profile' },
+        respond: (iq) => buildIqResult(iq)
+    })
+}

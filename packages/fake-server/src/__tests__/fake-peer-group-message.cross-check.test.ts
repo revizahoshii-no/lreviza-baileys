@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import type { WaClient, WaClientEventMap } from '@revizahoshii/hoshino'
+
+import { FakeWaServer } from '../api/FakeWaServer'
+
+import { createHoshinoClient } from './helpers/hoshino-client'
+
+function waitForMessage(
+    client: WaClient,
+    predicate: (event: Parameters<WaClientEventMap['message']>[0]) => boolean,
+    timeoutMs = 8_000
+): Promise<Parameters<WaClientEventMap['message']>[0]> {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(
+            () => reject(new Error('timed out waiting for matching message')),
+            timeoutMs
+        )
+        const listener: WaClientEventMap['message'] = (event) => {
+            if (predicate(event)) {
+                clearTimeout(timer)
+                client.off('message', listener)
+                resolve(event)
+            }
+        }
+        client.on('message', listener)
+    })
+}
+
+test('fake peer sends a SenderKey-encrypted group message and lib emits message with groupJid', async () => {
+    const server = await FakeWaServer.start()
+    const { client } = createHoshinoClient(server, { sessionId: 'fake-peer-group-msg' })
+
+    const groupJid = '120363000000000000@g.us'
+    const peerJid = '5511777777777@s.whatsapp.net'
+
+    const messagePromise = waitForMessage(
+        client,
+        (event) => event.key.remoteJid === groupJid && event.message?.conversation === 'hello group'
+    )
+
+    try {
+        await client.connect()
+        const pipeline = await server.waitForAuthenticatedPipeline()
+
+        await server.triggerPreKeyUpload(pipeline)
+
+        const peer = await server.createFakePeer(
+            { jid: peerJid, displayName: 'Group Peer' },
+            pipeline
+        )
+
+        await peer.sendGroupConversation(groupJid, 'hello group')
+
+        const event = await messagePromise
+        assert.equal(event.key.remoteJid, groupJid)
+        assert.equal(event.key.participant ?? event.key.remoteJid, peerJid)
+        assert.equal(event.key.isGroup, true)
+        assert.equal(event.message?.conversation, 'hello group')
+    } finally {
+        await client.disconnect().catch(() => undefined)
+        await server.stop()
+    }
+})

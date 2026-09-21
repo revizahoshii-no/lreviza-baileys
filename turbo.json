@@ -1,0 +1,40 @@
+{
+    "$schema": "https://turbo.build/schema.json",
+    "tasks": {
+        "build": {
+            "dependsOn": ["^build"],
+            "outputs": ["dist/**"]
+        },
+        "test": {
+            "dependsOn": ["build"],
+            "passThroughEnv": [
+                "HOSHINO_TEST_MYSQL_HOST",
+                "HOSHINO_TEST_MYSQL_PORT",
+                "HOSHINO_TEST_MYSQL_USER",
+                "HOSHINO_TEST_MYSQL_PASSWORD",
+                "HOSHINO_TEST_MYSQL_DATABASE",
+                "HOSHINO_TEST_PG_HOST",
+                "HOSHINO_TEST_PG_PORT",
+                "HOSHINO_TEST_PG_USER",
+                "HOSHINO_TEST_PG_PASSWORD",
+                "HOSHINO_TEST_PG_DATABASE",
+                "HOSHINO_TEST_REDIS_HOST",
+                "HOSHINO_TEST_REDIS_PORT",
+                "HOSHINO_TEST_MONGO_HOST",
+                "HOSHINO_TEST_MONGO_PORT"
+            ]
+        },
+        "lint": {},
+        "typecheck": {
+            "inputs": [
+                "$TURBO_DEFAULT$",
+                "$TURBO_ROOT$/src/**/*.ts",
+                "$TURBO_ROOT$/tsconfig.base.json",
+                "$TURBO_ROOT$/packages/tsconfig.paths.json",
+                "$TURBO_ROOT$/spec/proto/**/*.ts",
+                "$TURBO_ROOT$/spec/proto/**/*.d.ts",
+                "$TURBO_ROOT$/spec/mex/**/*.d.ts"
+            ]
+        }
+    }
+}

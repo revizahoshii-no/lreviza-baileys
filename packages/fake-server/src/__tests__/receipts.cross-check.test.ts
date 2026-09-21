@@ -1,0 +1,81 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { FakeWaServer } from '../api/FakeWaServer'
+import { buildReceipt } from '../protocol/push/receipt'
+
+import { createHoshinoClient } from './helpers/hoshino-client'
+
+test('fake server pushes a read receipt and the lib emits receipt', async () => {
+    const server = await FakeWaServer.start()
+    const { client } = createHoshinoClient(server, { sessionId: 'receipts-inbound' })
+
+    const peerJid = '5511777777777@s.whatsapp.net'
+    const messageId = 'wa-msg-id-12345'
+
+    const receiptPromise = new Promise<{
+        readonly stanzaId?: string
+        readonly chatJid?: string
+        readonly status: string
+        readonly fromSelfDevice: boolean
+    }>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timed out waiting for receipt')), 5_000)
+        client.once('receipt', (event) => {
+            clearTimeout(timer)
+            resolve({
+                stanzaId: event.stanzaId,
+                chatJid: event.chatJid,
+                status: event.status,
+                fromSelfDevice: event.fromSelfDevice
+            })
+        })
+    })
+
+    try {
+        await client.connect()
+        const pipeline = await server.waitForAuthenticatedPipeline()
+
+        await pipeline.sendStanza(
+            buildReceipt({
+                id: messageId,
+                from: peerJid,
+                type: 'read'
+            })
+        )
+
+        const event = await receiptPromise
+        assert.equal(event.stanzaId, messageId)
+        assert.equal(event.chatJid, peerJid)
+        assert.equal(event.status, 'read')
+        assert.equal(event.fromSelfDevice, false)
+    } finally {
+        await client.disconnect().catch(() => undefined)
+        await server.stop()
+    }
+})
+
+test('client.sendReceipt emits a real <receipt/> stanza captured by the fake server', async () => {
+    const server = await FakeWaServer.start()
+    const { client } = createHoshinoClient(server, { sessionId: 'receipts-outbound' })
+
+    const peerJid = '5511777777777@s.whatsapp.net'
+    const messageId = 'outbound-receipt-id'
+
+    try {
+        await client.connect()
+        await server.waitForAuthenticatedPipeline()
+
+        const stanzaPromise = server.expectStanza({ tag: 'receipt' }, { timeoutMs: 5_000 })
+
+        await client.message.sendReceipt(peerJid, messageId, { type: 'read' })
+
+        const stanza = await stanzaPromise
+        assert.equal(stanza.tag, 'receipt')
+        assert.equal(stanza.attrs.id, messageId)
+        assert.equal(stanza.attrs.to, peerJid)
+        assert.equal(stanza.attrs.type, 'read')
+    } finally {
+        await client.disconnect().catch(() => undefined)
+        await server.stop()
+    }
+})

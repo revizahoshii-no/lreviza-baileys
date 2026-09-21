@@ -1,0 +1,139 @@
+{
+    "compilerOptions": {
+        "baseUrl": "..",
+        "paths": {
+            "@revizahoshii/hoshino": [
+                "src/index.ts"
+            ],
+            "@revizahoshii/hoshino/store": [
+                "src/store/index.ts"
+            ],
+            "@revizahoshii/hoshino/signal": [
+                "src/signal/index.ts"
+            ],
+            "@revizahoshii/hoshino/auth": [
+                "src/auth/index.ts"
+            ],
+            "@revizahoshii/hoshino/appstate": [
+                "src/appstate/index.ts"
+            ],
+            "@revizahoshii/hoshino/retry": [
+                "src/retry/index.ts"
+            ],
+            "@revizahoshii/hoshino/proto": [
+                "src/proto.ts"
+            ],
+            "@revizahoshii/hoshino/protocol": [
+                "src/protocol/index.ts"
+            ],
+            "@revizahoshii/hoshino/crypto": [
+                "src/crypto/index.ts"
+            ],
+            "@revizahoshii/hoshino/media": [
+                "src/media/index.ts"
+            ],
+            "@revizahoshii/hoshino/util": [
+                "src/util/index.ts"
+            ],
+            "@revizahoshii/hoshino/transport": [
+                "src/transport/index.ts"
+            ],
+            "@abprops-spec": [
+                "src/abprops-spec.ts"
+            ],
+            "@appstate": [
+                "src/appstate/index.ts"
+            ],
+            "@appstate/*": [
+                "src/appstate/*"
+            ],
+            "@appstate-spec": [
+                "src/appstate-spec.ts"
+            ],
+            "@auth": [
+                "src/auth/index.ts"
+            ],
+            "@auth/*": [
+                "src/auth/*"
+            ],
+            "@client": [
+                "src/client/index.ts"
+            ],
+            "@client/*": [
+                "src/client/*"
+            ],
+            "@crypto": [
+                "src/crypto/index.ts"
+            ],
+            "@crypto/*": [
+                "src/crypto/*"
+            ],
+            "@infra/*": [
+                "src/infra/*"
+            ],
+            "@media": [
+                "src/media/index.ts"
+            ],
+            "@media/*": [
+                "src/media/*"
+            ],
+            "@message": [
+                "src/message/index.ts"
+            ],
+            "@message/*": [
+                "src/message/*"
+            ],
+            "@protocol": [
+                "src/protocol/index.ts"
+            ],
+            "@protocol/*": [
+                "src/protocol/*"
+            ],
+            "@proto": [
+                "src/proto.ts"
+            ],
+            "@mex": [
+                "src/mex.ts"
+            ],
+            "@retry": [
+                "src/retry/index.ts"
+            ],
+            "@retry/*": [
+                "src/retry/*"
+            ],
+            "@signal": [
+                "src/signal/index.ts"
+            ],
+            "@signal/*": [
+                "src/signal/*"
+            ],
+            "@store": [
+                "src/store/index.ts"
+            ],
+            "@store/*": [
+                "src/store/*"
+            ],
+            "@transport": [
+                "src/transport/index.ts"
+            ],
+            "@transport/*": [
+                "src/transport/*"
+            ],
+            "@util/*": [
+                "src/util/*"
+            ],
+            "@version-spec": [
+                "src/version-spec.ts"
+            ],
+            "@revizahoshii/hoshino-*": [
+                "packages/*/src/index.ts"
+            ],
+            "@reviza": [
+                "src/client/reviza/index.ts"
+            ],
+            "@reviza/*": [
+                "src/client/reviza/*"
+            ]
+        }
+    }
+}

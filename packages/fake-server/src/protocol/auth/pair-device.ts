@@ -1,0 +1,139 @@
+/** Pairing IQ builders/parsers (source: `WAWebHandlePairDevice*`, `/wa-web`). */
+
+import type { BinaryNode } from '../../transport/codec'
+import { randomBytesAsync } from '../../transport/crypto'
+import { bytesToBase64UrlSafe, decodeBase64Url } from '../../transport/util'
+
+const PAIR_DEVICE_REF_COUNT = 6
+const PAIR_DEVICE_REF_BYTES = 16
+
+/**
+ * Mints the rotating refs a `pair-device` push carries.
+ *
+ * They are printable on purpose. A client reads `<ref>` as text and pastes it
+ * into a comma-separated QR payload, so raw random bytes can decode into a
+ * comma or a newline and quietly corrupt whatever reads that payload back -
+ * including the primary that has to echo the ref in its upload.
+ */
+export async function mintPairingRefs(count = PAIR_DEVICE_REF_COUNT): Promise<string[]> {
+    const raw = await Promise.all(
+        Array.from({ length: count }, () => randomBytesAsync(PAIR_DEVICE_REF_BYTES))
+    )
+    return raw.map((bytes) => bytesToBase64UrlSafe(bytes))
+}
+
+export interface BuildPairDeviceIqInput {
+    readonly id?: string
+    /**
+     * The six rotating refs the companion turns into a QR. The client reads
+     * them as text, so a primary-driven link (where the ref has to survive the
+     * round trip back in the primary's upload) issues printable strings.
+     */
+    readonly refs: readonly (Uint8Array | string)[]
+}
+
+export function buildPairDeviceIq(input: BuildPairDeviceIqInput): BinaryNode {
+    if (input.refs.length !== 6) {
+        throw new Error(`pair-device requires exactly 6 refs, got ${input.refs.length}`)
+    }
+    return {
+        tag: 'iq',
+        attrs: {
+            id: input.id ?? `pair-device-${Math.random().toString(36).slice(2, 10)}`,
+            type: 'set',
+            xmlns: 'md',
+            from: 's.whatsapp.net'
+        },
+        content: [
+            {
+                tag: 'pair-device',
+                attrs: {},
+                content: input.refs.map((ref) => ({
+                    tag: 'ref',
+                    attrs: {},
+                    content: ref
+                }))
+            }
+        ]
+    }
+}
+
+export interface BuildPairSuccessIqInput {
+    readonly id?: string
+    readonly deviceJid: string
+    readonly deviceLid?: string
+    readonly platform: string
+    readonly deviceIdentityBytes: Uint8Array
+    readonly bizName?: string
+}
+
+export function buildPairSuccessIq(input: BuildPairSuccessIqInput): BinaryNode {
+    const children: BinaryNode[] = [
+        {
+            tag: 'device',
+            attrs: {
+                jid: input.deviceJid,
+                ...(input.deviceLid !== undefined ? { lid: input.deviceLid } : {})
+            }
+        },
+        {
+            tag: 'platform',
+            attrs: { name: input.platform }
+        },
+        {
+            tag: 'device-identity',
+            attrs: {},
+            content: input.deviceIdentityBytes
+        }
+    ]
+    if (input.bizName !== undefined) {
+        children.push({
+            tag: 'biz',
+            attrs: { name: input.bizName }
+        })
+    }
+    return {
+        tag: 'iq',
+        attrs: {
+            id: input.id ?? `pair-success-${Math.random().toString(36).slice(2, 10)}`,
+            type: 'set',
+            xmlns: 'md',
+            from: 's.whatsapp.net'
+        },
+        content: [
+            {
+                tag: 'pair-success',
+                attrs: {},
+                content: children
+            }
+        ]
+    }
+}
+
+/** Parses `auth_qr`: `ref,noisePub,identityPub,advSecret,platform`. */
+export interface ParsedPairingQr {
+    readonly ref: string
+    readonly noisePublicKey: Uint8Array
+    readonly identityPublicKey: Uint8Array
+    readonly advSecretKey: Uint8Array
+    readonly platform: string
+}
+
+export function parsePairingQrString(qr: string): ParsedPairingQr {
+    const parts = qr.split(',')
+    if (parts.length < 5) {
+        throw new Error(`pairing qr must have 5 comma-separated parts, got ${parts.length}`)
+    }
+    const platform = parts[parts.length - 1]
+    const advSecretB64 = parts[parts.length - 2]
+    const identityPubB64 = parts[parts.length - 3]
+    const noisePubB64 = parts[parts.length - 4]
+    const ref = parts.slice(0, parts.length - 4).join(',')
+    return {
+        ref,
+        noisePublicKey: decodeBase64Url(noisePubB64, 'qr.noisePublicKey'),
+        identityPublicKey: decodeBase64Url(identityPubB64, 'qr.identityPublicKey'),
+        advSecretKey: decodeBase64Url(advSecretB64, 'qr.advSecretKey'),
+        platform
+    }
+}

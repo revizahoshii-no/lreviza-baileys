@@ -1,0 +1,9 @@
+dist
+node_modules
+spec
+.auth
+target
+coverage
+wa-web
+wa-mob
+packages/native/wasm/pkg

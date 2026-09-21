@@ -1,0 +1,850 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
+
+import { APP_STATE_EMPTY_LT_HASH } from '@revizahoshii/hoshino/appstate'
+import { toSerializedPubKey, X25519 } from '@revizahoshii/hoshino/crypto'
+import { WA_APP_STATE_COLLECTIONS } from '@revizahoshii/hoshino/protocol'
+import type { WaRetryOutboundMessageRecord } from '@revizahoshii/hoshino/retry'
+import {
+    decodeSignalSessionRecord,
+    encodeSignalSessionRecord,
+    type SenderKeyRecord,
+    type SignalAddress,
+    type SignalSessionRecord
+} from '@revizahoshii/hoshino/signal'
+
+import { WaAppStateSqliteStore } from '../appstate.store'
+import { WaChatMetadataSqliteStore } from '../chat-metadata.store'
+import { openSqliteConnection, type WaSqliteConnection } from '../connection'
+import { WaDeviceListSqliteStore } from '../device-list.store'
+import { WaGroupMetadataSqliteStore } from '../group-metadata.store'
+import { WaIdentitySqliteStore } from '../identity.store'
+import { WaMessageSecretSqliteStore } from '../message-secret.store'
+import { WaPreKeySqliteStore } from '../pre-key.store'
+import { WaRetrySqliteStore } from '../retry.store'
+import { SenderKeySqliteStore } from '../sender-key.store'
+import { WaSessionSqliteStore } from '../session.store'
+import { WaSignalSqliteStore } from '../signal.store'
+import type { WaSqliteStorageOptions } from '../types'
+
+import { TEST_SQLITE_DRIVER } from './_helpers'
+
+function makeBytes(length: number, seed = 0): Uint8Array {
+    const out = new Uint8Array(length)
+    for (let index = 0; index < out.length; index += 1) {
+        out[index] = (seed + index) & 0xff
+    }
+    return out
+}
+
+function makeSqliteOptions(path: string, sessionId: string): WaSqliteStorageOptions {
+    return {
+        path,
+        sessionId,
+        driver: TEST_SQLITE_DRIVER
+    }
+}
+
+function makeAppStateKeyId(deviceId: number, epoch: number): Uint8Array {
+    const keyId = new Uint8Array(8)
+    keyId[0] = (deviceId >> 8) & 0xff
+    keyId[1] = deviceId & 0xff
+    new DataView(keyId.buffer).setUint32(2, epoch, false)
+    return keyId
+}
+
+function makeAddress(user: string, device: number): SignalAddress {
+    return {
+        user,
+        server: 's.whatsapp.net',
+        device
+    }
+}
+
+function asConnection(store: object): Promise<WaSqliteConnection> {
+    return (store as { readonly getConnection: () => Promise<WaSqliteConnection> }).getConnection()
+}
+
+async function makeSessionRecord(seed = 0): Promise<SignalSessionRecord> {
+    const [localIdentity, remoteIdentity, sendRatchet, recvRatchet, baseKey] = await Promise.all([
+        X25519.generateKeyPair(),
+        X25519.generateKeyPair(),
+        X25519.generateKeyPair(),
+        X25519.generateKeyPair(),
+        X25519.generateKeyPair()
+    ])
+
+    const record: SignalSessionRecord = {
+        local: {
+            regId: 100 + seed,
+            pubKey: toSerializedPubKey(localIdentity.pubKey)
+        },
+        remote: {
+            regId: 200 + seed,
+            pubKey: toSerializedPubKey(remoteIdentity.pubKey)
+        },
+        rootKey: makeBytes(32, 1 + seed),
+        sendChain: {
+            ratchetKey: {
+                pubKey: toSerializedPubKey(sendRatchet.pubKey),
+                privKey: sendRatchet.privKey
+            },
+            nextMsgIndex: 0,
+            chainKey: makeBytes(32, 2 + seed)
+        },
+        recvChains: [
+            {
+                senderRatchetKey: toSerializedPubKey(recvRatchet.pubKey),
+                chainKey: { index: 0, key: makeBytes(32, 3 + seed) },
+                messageKeys: []
+            }
+        ],
+        initialExchangeInfo: {
+            remoteOneTimeId: 1,
+            remoteSignedId: 1,
+            localOneTimePubKey: toSerializedPubKey(baseKey.pubKey)
+        },
+        prevSendChainHighestIndex: 0,
+        aliceBaseKey: toSerializedPubKey(baseKey.pubKey),
+        prevSessions: []
+    }
+    // Round-trip through encode→decode to normalize protobuf instances,
+    // so deepStrictEqual comparisons match the store's output format.
+    return decodeSignalSessionRecord(encodeSignalSessionRecord(record))
+}
+
+test('sqlite appstate store handles sync keys, collection state and session scoping', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-appstate-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const storeA = new WaAppStateSqliteStore(makeSqliteOptions(sqlitePath, 'session-a'))
+    const storeB = new WaAppStateSqliteStore(makeSqliteOptions(sqlitePath, 'session-b'))
+
+    try {
+        const keyLow = {
+            keyId: makeAppStateKeyId(2, 5),
+            keyData: makeBytes(32, 1),
+            timestamp: 10
+        }
+        const keyHigh = {
+            keyId: makeAppStateKeyId(1, 9),
+            keyData: makeBytes(32, 2),
+            timestamp: 20
+        }
+
+        assert.equal(await storeA.upsertSyncKeys([keyLow, keyHigh]), 2)
+        assert.equal(await storeA.upsertSyncKeys([keyLow]), 0)
+        assert.deepEqual(await storeA.getSyncKeyData(keyHigh.keyId), keyHigh.keyData)
+        assert.deepEqual(await storeA.getSyncKeyDataBatch([]), [])
+        assert.deepEqual(
+            await storeA.getSyncKeyDataBatch([keyHigh.keyId, makeBytes(8, 9), keyHigh.keyId]),
+            [keyHigh.keyData, null, keyHigh.keyData]
+        )
+        assert.equal(await storeA.getSyncKeyData(makeBytes(8, 9)), null)
+
+        const activeKey = await storeA.getActiveSyncKey()
+        assert.ok(activeKey)
+        assert.deepEqual(activeKey?.keyId, keyHigh.keyId)
+
+        const indexMap = new Map<string, Uint8Array>([
+            ['aa', makeBytes(8, 1)],
+            ['bb', makeBytes(8, 2)]
+        ])
+        await storeA.setCollectionStates([
+            {
+                collection: WA_APP_STATE_COLLECTIONS.REGULAR,
+                version: 11,
+                hash: makeBytes(128, 4),
+                indexValueMap: indexMap
+            }
+        ])
+        await storeA.setCollectionStates([])
+
+        const regularState = await storeA.getCollectionState(WA_APP_STATE_COLLECTIONS.REGULAR)
+        assert.equal(regularState.version, 11)
+        assert.equal(regularState.indexValueMap.size, 2)
+        assert.deepEqual(regularState.indexValueMap.get('aa'), makeBytes(8, 1))
+        const batchStates = await storeA.getCollectionStates([
+            WA_APP_STATE_COLLECTIONS.REGULAR,
+            WA_APP_STATE_COLLECTIONS.CRITICAL_BLOCK
+        ])
+        assert.equal(batchStates.length, 2)
+        assert.equal(batchStates[0].initialized, true)
+        assert.equal(batchStates[0].version, 11)
+        assert.equal(batchStates[1].initialized, false)
+
+        const exported = await storeA.exportData()
+        assert.equal(exported.keys.length, 2)
+        assert.equal(exported.collections.regular?.version, 11)
+
+        assert.equal(await storeB.getSyncKeyData(keyLow.keyId), null)
+        const missingState = await storeB.getCollectionState(WA_APP_STATE_COLLECTIONS.REGULAR)
+        assert.equal(missingState.version, 0)
+        assert.deepEqual(missingState.hash, APP_STATE_EMPTY_LT_HASH)
+
+        await storeA.clear()
+        const afterClear = await storeA.exportData()
+        assert.equal(afterClear.keys.length, 0)
+        assert.deepEqual(afterClear.collections, {})
+    } finally {
+        await Promise.all([storeA.destroy(), storeB.destroy()])
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite appstate setCollectionStates writes only the index/value delta', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-appstate-diff-'))
+    const connection = await openSqliteConnection({
+        path: join(dir, 'state.sqlite'),
+        sessionId: 'session-diff',
+        driver: TEST_SQLITE_DRIVER
+    })
+
+    // Count write statements so the test asserts the delta is written, not a
+    // full delete-and-reinsert.
+    const writes = { INSERT: 0, DELETE: 0 }
+    const runImpl = connection.run.bind(connection)
+    ;(connection as unknown as { run: WaSqliteConnection['run'] }).run = (sql, params) => {
+        const verb = sql.trim().split(/\s+/)[0]?.toUpperCase()
+        if (verb === 'INSERT' || verb === 'DELETE') writes[verb] += 1
+        return runImpl(sql, params)
+    }
+
+    const store = new WaAppStateSqliteStore({ connection, sessionId: 'session-diff' })
+    const COL = WA_APP_STATE_COLLECTIONS.REGULAR_HIGH
+
+    try {
+        const seed = new Map<string, Uint8Array>()
+        for (let i = 0; i < 200; i += 1) seed.set('idx' + i, makeBytes(8, i & 0xff))
+        await store.setCollectionStates([
+            { collection: COL, version: 1, hash: makeBytes(128, 1), indexValueMap: seed }
+        ])
+
+        // Change exactly one of the 200 entries: only the version row and that
+        // single value row are written, nothing is deleted.
+        writes.INSERT = 0
+        writes.DELETE = 0
+        const changed = new Map(seed)
+        changed.set('idx7', makeBytes(8, 0xee))
+        await store.setCollectionStates([
+            { collection: COL, version: 2, hash: makeBytes(128, 9), indexValueMap: changed }
+        ])
+        assert.equal(writes.INSERT, 2) // 1 version upsert + 1 changed value
+        assert.equal(writes.DELETE, 0)
+
+        // Change one, add one, remove one.
+        writes.INSERT = 0
+        writes.DELETE = 0
+        const mixed = new Map(changed)
+        mixed.delete('idx0')
+        mixed.set('idx200', makeBytes(8, 0x55))
+        mixed.set('idx9', makeBytes(8, 0xcd))
+        await store.setCollectionStates([
+            { collection: COL, version: 3, hash: makeBytes(128, 3), indexValueMap: mixed }
+        ])
+        assert.equal(writes.INSERT, 3) // version + changed + added
+        assert.equal(writes.DELETE, 1) // only the removed entry
+
+        const state = await store.getCollectionState(COL)
+        assert.equal(state.version, 3)
+        assert.equal(state.indexValueMap.size, 200)
+        assert.deepEqual(state.indexValueMap.get('idx7'), makeBytes(8, 0xee))
+        assert.deepEqual(state.indexValueMap.get('idx9'), makeBytes(8, 0xcd))
+        assert.deepEqual(state.indexValueMap.get('idx200'), makeBytes(8, 0x55))
+        assert.equal(state.indexValueMap.has('idx0'), false)
+
+        // Emptying the map deletes the remaining rows.
+        await store.setCollectionStates([
+            { collection: COL, version: 4, hash: APP_STATE_EMPTY_LT_HASH, indexValueMap: new Map() }
+        ])
+        const emptied = await store.getCollectionState(COL)
+        assert.equal(emptied.version, 4)
+        assert.equal(emptied.indexValueMap.size, 0)
+    } finally {
+        await store.destroy()
+        connection.close()
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite device-list and group-metadata stores cover batch, expiry, cleanup and invalid payloads', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-cache-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const deviceStore = new WaDeviceListSqliteStore(
+        makeSqliteOptions(sqlitePath, 'session-a'),
+        100,
+        1
+    )
+    const groupMetadataStore = new WaGroupMetadataSqliteStore(
+        makeSqliteOptions(sqlitePath, 'session-a'),
+        100
+    )
+    const chatMetadataStore = new WaChatMetadataSqliteStore(
+        makeSqliteOptions(sqlitePath, 'session-a'),
+        100
+    )
+
+    try {
+        await deviceStore.upsertUserDevicesBatch([
+            {
+                userJid: '5511@s.whatsapp.net',
+                deviceJids: ['5511@s.whatsapp.net', '5511:1@s.whatsapp.net'],
+                updatedAtMs: 1000
+            }
+        ])
+        await deviceStore.upsertUserDevicesBatch([
+            {
+                userJid: '5522@s.whatsapp.net',
+                deviceJids: ['5522@s.whatsapp.net'],
+                updatedAtMs: 1000
+            },
+            {
+                userJid: '5533@s.whatsapp.net',
+                deviceJids: ['5533@s.whatsapp.net'],
+                updatedAtMs: 900
+            }
+        ])
+        await deviceStore.upsertUserDevicesBatch([])
+
+        const [activeDevices] = await deviceStore.getUserDevicesBatch(['5511@s.whatsapp.net'], 1050)
+        assert.ok(activeDevices)
+        assert.equal(activeDevices?.deviceJids.length, 2)
+
+        const deviceBatch = await deviceStore.getUserDevicesBatch(
+            ['5511@s.whatsapp.net', '5533@s.whatsapp.net', 'missing@s.whatsapp.net'],
+            1_010
+        )
+        assert.equal(deviceBatch[0]?.userJid, '5511@s.whatsapp.net')
+        assert.equal(deviceBatch[1], null)
+        assert.equal(deviceBatch[2], null)
+
+        assert.equal(await deviceStore.cleanupExpired(1_200), 2)
+        await deviceStore.clear()
+        assert.equal((await deviceStore.getUserDevicesBatch([])).length, 0)
+
+        const deviceDb = await asConnection(deviceStore)
+        await deviceStore.upsertUserDevicesBatch([
+            {
+                userJid: 'broken@s.whatsapp.net',
+                deviceJids: ['broken@s.whatsapp.net'],
+                updatedAtMs: 2000
+            }
+        ])
+        deviceDb.run(
+            `UPDATE device_list_cache
+             SET device_jids_json = ?
+             WHERE session_id = ? AND user_jid = ?`,
+            ['{"invalid":true}', 'session-a', 'broken@s.whatsapp.net']
+        )
+        await assert.rejects(
+            () => deviceStore.getUserDevicesBatch(['broken@s.whatsapp.net'], 2_001),
+            /device_jids_json must be an array/
+        )
+
+        await groupMetadataStore.upsertGroupMetadata({
+            groupJid: '120@g.us',
+            participants: ['5511@s.whatsapp.net', '5522@s.whatsapp.net'],
+            ephemeral: 86_400,
+            ephemeralTrigger: 5,
+            updatedAtMs: 1000
+        })
+
+        const participants = await groupMetadataStore.getGroupMetadata('120@g.us', 1_020)
+        assert.ok(participants)
+        assert.equal(participants?.participants.length, 2)
+        assert.equal(participants?.ephemeral, 86_400)
+        assert.equal(participants?.ephemeralTrigger, 5)
+
+        await groupMetadataStore.upsertGroupMetadata({
+            groupJid: '120@g.us',
+            participants: ['5511@s.whatsapp.net', '5522@s.whatsapp.net'],
+            updatedAtMs: 1_010
+        })
+        const cleared = await groupMetadataStore.getGroupMetadata('120@g.us', 1_020)
+        assert.equal(cleared?.ephemeral, undefined)
+        assert.equal(cleared?.ephemeralTrigger, undefined)
+
+        await chatMetadataStore.upsertChatMetadata({
+            chatJid: '5511@lid',
+            ephemeralExpiration: 86_400,
+            ephemeralSettingTimestamp: 1_751_808_692,
+            updatedAtMs: 1000
+        })
+        const chatSnapshot = await chatMetadataStore.getChatMetadata('5511@lid', 1_020)
+        assert.ok(chatSnapshot)
+        assert.equal(chatSnapshot?.ephemeralExpiration, 86_400)
+        assert.equal(chatSnapshot?.ephemeralSettingTimestamp, 1_751_808_692)
+        assert.equal(await chatMetadataStore.getChatMetadata('5511@lid', 2_000), null)
+        await chatMetadataStore.clear()
+
+        assert.equal(await groupMetadataStore.deleteGroupMetadata('missing@g.us'), 0)
+        assert.equal(await groupMetadataStore.cleanupExpired(1_200), 1)
+
+        await groupMetadataStore.upsertGroupMetadata({
+            groupJid: 'bad@g.us',
+            participants: ['5511@s.whatsapp.net'],
+            updatedAtMs: 2000
+        })
+        const participantsDb = await asConnection(groupMetadataStore)
+        participantsDb.run(
+            `UPDATE group_participants_cache
+             SET participants_json = ?
+             WHERE session_id = ? AND group_jid = ?`,
+            ['{"invalid":true}', 'session-a', 'bad@g.us']
+        )
+        await assert.rejects(
+            () => groupMetadataStore.getGroupMetadata('bad@g.us', 2_010),
+            /participants_json must be an array/
+        )
+        await groupMetadataStore.clear()
+    } finally {
+        await Promise.all([
+            deviceStore.destroy(),
+            groupMetadataStore.destroy(),
+            chatMetadataStore.destroy()
+        ])
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite retry store tracks outbound state, inbound counters and expiration', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-retry-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const store = new WaRetrySqliteStore(makeSqliteOptions(sqlitePath, 'session-a'), 500)
+
+    try {
+        assert.equal(store.getTtlMs(), 500)
+        assert.equal(store.supportsRawReplayPayload(), false)
+
+        const outbound: WaRetryOutboundMessageRecord = {
+            messageId: 'm1',
+            toJid: '5511@s.whatsapp.net',
+            eligibleRequesterDeviceJids: ['5511@s.whatsapp.net', '5511:1@s.whatsapp.net'],
+            replayMode: 'encrypted',
+            replayPayload: makeBytes(12, 1),
+            state: 'pending',
+            updatedAtMs: 1000,
+            expiresAtMs: 1500
+        }
+        await store.upsertOutboundMessage(outbound)
+
+        const loaded = await store.getOutboundMessage('m1')
+        assert.ok(loaded)
+        assert.equal(loaded?.state, 'pending')
+        assert.deepEqual(loaded?.replayPayload, outbound.replayPayload)
+        assert.deepEqual(loaded?.eligibleRequesterDeviceJids, [
+            '5511@s.whatsapp.net',
+            '5511:1@s.whatsapp.net'
+        ])
+        const eligibleStatus = await store.getOutboundRequesterStatus?.(
+            'm1',
+            '5511:1@s.whatsapp.net'
+        )
+        assert.deepEqual(eligibleStatus, { eligible: true, delivered: false })
+        const ineligibleStatus = await store.getOutboundRequesterStatus?.(
+            'm1',
+            '5599@s.whatsapp.net'
+        )
+        assert.deepEqual(ineligibleStatus, { eligible: false, delivered: false })
+        assert.equal(await store.getOutboundMessage('missing'), null)
+
+        await store.updateOutboundMessageState('m1', 'delivered', 1100, 1600)
+        await store.markOutboundRequesterDelivered?.('m1', '5511:1@s.whatsapp.net', 1150, 1700)
+        const updated = await store.getOutboundMessage('m1')
+        assert.equal(updated?.state, 'delivered')
+        assert.equal(updated?.updatedAtMs, 1150)
+        assert.equal(updated?.expiresAtMs, 1700)
+        assert.deepEqual(updated?.deliveredRequesterDeviceJids, ['5511:1@s.whatsapp.net'])
+        const deliveredStatus = await store.getOutboundRequesterStatus?.(
+            'm1',
+            '5511:1@s.whatsapp.net'
+        )
+        assert.deepEqual(deliveredStatus, { eligible: true, delivered: true })
+        await store.markOutboundRequesterDelivered?.('m1', '5511:1@s.whatsapp.net', 1300, 1800)
+        const duplicateDelivered = await store.getOutboundMessage('m1')
+        assert.equal(duplicateDelivered?.updatedAtMs, 1150)
+        assert.equal(duplicateDelivered?.expiresAtMs, 1700)
+
+        assert.equal(await store.incrementInboundCounter('m1', 'req@s.whatsapp.net', 1200, 1300), 1)
+        assert.equal(await store.incrementInboundCounter('m1', 'req@s.whatsapp.net', 1250, 1300), 2)
+        assert.equal(await store.cleanupExpired(1_100), 0)
+        assert.equal(await store.cleanupExpired(2_000), 2)
+
+        await store.clear()
+    } finally {
+        await store.destroy()
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite sender-key store handles lists and deletions', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-sender-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const store = new SenderKeySqliteStore(makeSqliteOptions(sqlitePath, 'session-a'))
+    const senderA = makeAddress('5511', 0)
+    const senderB = makeAddress('5522', 1)
+    const groupId = '120363000000000000@g.us'
+
+    try {
+        const record: SenderKeyRecord = {
+            groupId,
+            sender: senderA,
+            keyId: 1,
+            iteration: 0,
+            chainKey: makeBytes(32, 1),
+            signingPublicKey: makeBytes(33, 2),
+            signingPrivateKey: makeBytes(32, 3),
+            unusedMessageKeys: [{ iteration: 0, seed: makeBytes(50, 4) }]
+        }
+        await store.upsertSenderKey(record)
+        await store.upsertSenderKeyDistribution({
+            groupId,
+            sender: senderA,
+            keyId: 1,
+            timestampMs: 1000
+        })
+        await store.upsertSenderKeyDistributions([
+            {
+                groupId,
+                sender: senderA,
+                keyId: 1,
+                timestampMs: 1001
+            },
+            {
+                groupId,
+                sender: senderB,
+                keyId: 2,
+                timestampMs: 1002
+            }
+        ])
+        await store.upsertSenderKeyDistributions([])
+
+        const groupList = await store.getGroupSenderKeyList(groupId)
+        assert.equal(groupList.skList.length, 1)
+        assert.equal(groupList.skDistribList.length, 2)
+
+        const deviceKey = await store.getDeviceSenderKey(groupId, senderA)
+        assert.ok(deviceKey)
+        assert.equal(deviceKey?.keyId, 1)
+        assert.equal(await store.getDeviceSenderKey(groupId, makeAddress('missing', 0)), null)
+
+        const [distribution] = await store.getDeviceSenderKeyDistributions(groupId, [senderB])
+        assert.ok(distribution)
+        assert.equal(distribution?.keyId, 2)
+
+        const batched = await store.getDeviceSenderKeyDistributions(groupId, [senderA, senderB])
+        assert.equal(batched.length, 2)
+        assert.equal(batched[0]?.keyId, 1)
+        assert.equal(batched[1]?.keyId, 2)
+        assert.equal((await store.getDeviceSenderKeyDistributions(groupId, [])).length, 0)
+
+        assert.equal(await store.markForgetSenderKey(groupId, []), 0)
+        assert.ok((await store.deleteDeviceSenderKey(senderB, groupId)) > 0)
+        assert.equal(await store.deleteDeviceSenderKey(senderB, groupId), 0)
+        assert.ok((await store.markForgetSenderKey(groupId, [senderA])) > 0)
+    } finally {
+        await store.destroy()
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite signal store covers prekeys, sessions, identities and state helpers', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-signal-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const optionsA = makeSqliteOptions(sqlitePath, 'session-a')
+    const signalStore = new WaSignalSqliteStore(optionsA)
+    const preKeyStore = new WaPreKeySqliteStore(optionsA, { preKeyBatchSize: 1 })
+    const sessionStore = new WaSessionSqliteStore(optionsA, { hasSessionBatchSize: 1 })
+    const identityStore = new WaIdentitySqliteStore(optionsA)
+    const signalStoreB = new WaSignalSqliteStore(makeSqliteOptions(sqlitePath, 'session-b'))
+
+    try {
+        assert.equal(await signalStore.getRegistrationInfo(), null)
+        const registrationKeyPair = await X25519.generateKeyPair()
+        await signalStore.setRegistrationInfo({
+            registrationId: 777,
+            identityKeyPair: registrationKeyPair
+        })
+        assert.equal((await signalStore.getRegistrationInfo())?.registrationId, 777)
+        assert.equal(await signalStoreB.getRegistrationInfo(), null)
+
+        const signedPreKeyPair = await X25519.generateKeyPair()
+        await signalStore.setSignedPreKey({
+            keyId: 11,
+            keyPair: signedPreKeyPair,
+            signature: makeBytes(64, 3),
+            uploaded: false
+        })
+        assert.equal((await signalStore.getSignedPreKey())?.keyId, 11)
+        assert.equal((await signalStore.getSignedPreKeyById(11))?.keyId, 11)
+        assert.equal(await signalStore.getSignedPreKeyById(12), null)
+
+        await signalStore.setSignedPreKeyRotationTs(1234)
+        assert.equal(await signalStore.getSignedPreKeyRotationTs(), 1234)
+
+        const preKeyPair5 = await X25519.generateKeyPair()
+        await preKeyStore.putPreKey({
+            keyId: 5,
+            keyPair: preKeyPair5,
+            uploaded: false
+        })
+        assert.equal((await preKeyStore.getPreKeyById(5))?.keyId, 5)
+
+        const generated = await preKeyStore.getOrGenPreKeys(2, async (keyId) => {
+            const keyPair = await X25519.generateKeyPair()
+            return {
+                keyId,
+                keyPair,
+                uploaded: false
+            }
+        })
+        assert.equal(generated.length, 2)
+        await assert.rejects(
+            () =>
+                preKeyStore.getOrGenPreKeys(0, async (keyId) => {
+                    const keyPair = await X25519.generateKeyPair()
+                    return { keyId, keyPair, uploaded: false }
+                }),
+            /invalid prekey count/
+        )
+
+        assert.deepEqual(await preKeyStore.getPreKeysById([]), [])
+        const byIds = await preKeyStore.getPreKeysById([5, generated[1].keyId, 999, 5])
+        assert.equal(byIds[0]?.keyId, 5)
+        assert.equal(byIds[1]?.keyId, generated[1].keyId)
+        assert.equal(byIds[2], null)
+        assert.equal(byIds[3]?.keyId, 5)
+
+        assert.equal(await preKeyStore.consumePreKeyById(999), null)
+        assert.equal((await preKeyStore.consumePreKeyById(5))?.keyId, 5)
+        assert.equal(await preKeyStore.getPreKeyById(5), null)
+
+        const single = await preKeyStore.getOrGenSinglePreKey(async (keyId) => {
+            const keyPair = await X25519.generateKeyPair()
+            return { keyId, keyPair, uploaded: false }
+        })
+        assert.ok(single.keyId > 0)
+
+        await assert.rejects(() => preKeyStore.markKeyAsUploaded(-1), /out of boundary/)
+        await preKeyStore.markKeyAsUploaded(single.keyId)
+
+        await preKeyStore.setServerHasPreKeys(true)
+        assert.equal(await preKeyStore.getServerHasPreKeys(), true)
+
+        // Regression: a generator returning an already-stored keyId must fail fast
+        // (insert is a no-op) instead of looping forever - the bootstrap hang.
+        const collidingPair = await X25519.generateKeyPair()
+        await preKeyStore.putPreKey({ keyId: 4242, keyPair: collidingPair, uploaded: false })
+        await preKeyStore.markKeyAsUploaded(4242)
+        await assert.rejects(
+            () =>
+                preKeyStore.getOrGenSinglePreKey(async () => ({
+                    keyId: 4242,
+                    keyPair: collidingPair,
+                    uploaded: false
+                })),
+            /made no progress/
+        )
+
+        const sessionAddressA = makeAddress('5511', 0)
+        const sessionAddressB = makeAddress('5522', 0)
+        assert.equal(await sessionStore.hasSession(sessionAddressA), false)
+
+        const sessionRecord = await makeSessionRecord(1)
+        await sessionStore.setSession(sessionAddressA, sessionRecord)
+        assert.equal(await sessionStore.hasSession(sessionAddressA), true)
+        assert.deepEqual(await sessionStore.hasSessions([]), [])
+        assert.deepEqual(await sessionStore.hasSessions([sessionAddressA, sessionAddressB]), [
+            true,
+            false
+        ])
+        assert.deepEqual(await sessionStore.getSessionsBatch([]), [])
+        assert.deepEqual(await sessionStore.getSessionsBatch([sessionAddressA, sessionAddressB]), [
+            sessionRecord,
+            null
+        ])
+        const sessionRecordB = await makeSessionRecord(2)
+        await sessionStore.setSessionsBatch([{ address: sessionAddressB, session: sessionRecordB }])
+        assert.deepEqual(await sessionStore.getSessionsBatch([sessionAddressA, sessionAddressB]), [
+            sessionRecord,
+            sessionRecordB
+        ])
+        assert.ok(await sessionStore.getSession(sessionAddressA))
+        await sessionStore.deleteSession(sessionAddressA)
+        assert.equal(await sessionStore.getSession(sessionAddressA), null)
+
+        await identityStore.setRemoteIdentity(sessionAddressA, makeBytes(33, 20))
+        assert.deepEqual(await identityStore.getRemoteIdentity(sessionAddressA), makeBytes(33, 20))
+        assert.deepEqual(await identityStore.getRemoteIdentities([]), [])
+        await identityStore.setRemoteIdentities([])
+        await identityStore.setRemoteIdentities([
+            { address: sessionAddressA, identityKey: makeBytes(33, 21) },
+            { address: sessionAddressB, identityKey: makeBytes(33, 22) }
+        ])
+        assert.deepEqual(await identityStore.getRemoteIdentity(sessionAddressA), makeBytes(33, 21))
+        assert.deepEqual(await identityStore.getRemoteIdentity(sessionAddressB), makeBytes(33, 22))
+        assert.deepEqual(
+            await identityStore.getRemoteIdentities([
+                sessionAddressA,
+                sessionAddressB,
+                sessionAddressA
+            ]),
+            [makeBytes(33, 21), makeBytes(33, 22), makeBytes(33, 21)]
+        )
+    } finally {
+        await Promise.all([
+            signalStore.destroy(),
+            signalStoreB.destroy(),
+            preKeyStore.destroy(),
+            sessionStore.destroy(),
+            identityStore.destroy()
+        ])
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite signal prekey generation is safe across concurrent sessions', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-signal-concurrency-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const storeA = new WaPreKeySqliteStore(makeSqliteOptions(sqlitePath, 'session-a'))
+    const storeB = new WaPreKeySqliteStore(makeSqliteOptions(sqlitePath, 'session-b'))
+
+    try {
+        const generator = async (keyId: number) => {
+            await new Promise<void>((resolve) => setTimeout(resolve, 15))
+            const keyPair = await X25519.generateKeyPair()
+            return {
+                keyId,
+                keyPair,
+                uploaded: false
+            }
+        }
+        const [keysA, keysB] = await Promise.all([
+            storeA.getOrGenPreKeys(2, generator),
+            storeB.getOrGenPreKeys(2, generator)
+        ])
+        assert.equal(keysA.length, 2)
+        assert.equal(keysB.length, 2)
+        assert.equal((await storeA.getPreKeyById(keysA[0].keyId))?.keyId, keysA[0].keyId)
+        assert.equal((await storeB.getPreKeyById(keysB[0].keyId))?.keyId, keysB[0].keyId)
+    } finally {
+        await Promise.all([storeA.destroy(), storeB.destroy()])
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite shared connection keeps other session alive after one destroy', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-destroy-lifecycle-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const storeA = new WaDeviceListSqliteStore(makeSqliteOptions(sqlitePath, 'session-a'), 1_000, 1)
+    const storeB = new WaDeviceListSqliteStore(makeSqliteOptions(sqlitePath, 'session-b'), 1_000, 1)
+
+    try {
+        await storeA.upsertUserDevicesBatch([
+            {
+                userJid: '5511@s.whatsapp.net',
+                deviceJids: ['5511@s.whatsapp.net'],
+                updatedAtMs: 100
+            }
+        ])
+        await storeB.upsertUserDevicesBatch([
+            {
+                userJid: '5522@s.whatsapp.net',
+                deviceJids: ['5522@s.whatsapp.net'],
+                updatedAtMs: 100
+            }
+        ])
+        await storeA.destroy()
+        const [snapshot] = await storeB.getUserDevicesBatch(['5522@s.whatsapp.net'], 150)
+        assert.ok(snapshot)
+        assert.equal(snapshot?.userJid, '5522@s.whatsapp.net')
+    } finally {
+        await Promise.allSettled([storeA.destroy(), storeB.destroy()])
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite signal prekey generation keeps monotonic progress for overlapping same-session calls', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-signal-same-session-concurrency-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const store = new WaPreKeySqliteStore(makeSqliteOptions(sqlitePath, 'session-a'))
+
+    try {
+        const generator = async (keyId: number) => {
+            await new Promise<void>((resolve) => setTimeout(resolve, 10))
+            const keyPair = await X25519.generateKeyPair()
+            return {
+                keyId,
+                keyPair,
+                uploaded: false
+            }
+        }
+        await Promise.all([
+            store.getOrGenPreKeys(3, generator),
+            store.getOrGenPreKeys(3, generator)
+        ])
+
+        const sixKeys = await store.getOrGenPreKeys(6, generator)
+        assert.equal(sixKeys.length, 6)
+        const keyIds = sixKeys.map((record) => record.keyId).sort((left, right) => left - right)
+        assert.deepEqual(keyIds, [1, 2, 3, 4, 5, 6])
+    } finally {
+        await store.destroy()
+        await rm(dir, { recursive: true, force: true })
+    }
+})
+
+test('sqlite message-secret store covers set/get, batch, TTL expiry and cleanup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hoshino-sqlite-msgsecret-'))
+    const sqlitePath = join(dir, 'state.sqlite')
+    const store = new WaMessageSecretSqliteStore(makeSqliteOptions(sqlitePath, 'session-a'), 100)
+
+    try {
+        const entryA = { secret: new Uint8Array([1, 2, 3]), senderJid: 'alice@s.whatsapp.net' }
+        const entryB = { secret: new Uint8Array([4, 5, 6]), senderJid: 'bob@s.whatsapp.net' }
+
+        await store.set('msg-1', entryA)
+        await store.set('msg-2', entryB)
+
+        assert.deepEqual(await store.get('msg-1', Date.now()), entryA)
+        assert.deepEqual(await store.get('msg-2', Date.now()), entryB)
+        assert.equal(await store.get('missing', Date.now()), null)
+
+        // getBatch preserves order and handles missing
+        const batch = await store.getBatch(['msg-2', 'missing', 'msg-1'], Date.now())
+        assert.equal(batch.length, 3)
+        assert.deepEqual(batch[0], entryB)
+        assert.equal(batch[1], null)
+        assert.deepEqual(batch[2], entryA)
+
+        // empty getBatch
+        assert.deepEqual(await store.getBatch([], Date.now()), [])
+
+        // setBatch
+        const entryC = { secret: new Uint8Array([7, 8, 9]), senderJid: 'carol@s.whatsapp.net' }
+        const entryD = { secret: new Uint8Array([10, 11, 12]), senderJid: 'dave@s.whatsapp.net' }
+        await store.setBatch([
+            { messageId: 'msg-3', entry: entryC },
+            { messageId: 'msg-4', entry: entryD }
+        ])
+        assert.deepEqual(await store.get('msg-3', Date.now()), entryC)
+        assert.deepEqual(await store.get('msg-4', Date.now()), entryD)
+
+        // TTL expiry – reading after TTL returns null
+        const expired = await store.get('msg-1', Date.now() + 200)
+        assert.equal(expired, null)
+
+        // cleanupExpired
+        assert.ok((await store.cleanupExpired(Date.now() + 200)) >= 1)
+
+        // clear
+        await store.set('msg-5', entryA)
+        await store.clear()
+        assert.equal(await store.get('msg-5', Date.now()), null)
+    } finally {
+        await store.destroy?.()
+        await rm(dir, { recursive: true, force: true })
+    }
+})

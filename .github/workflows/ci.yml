@@ -1,0 +1,415 @@
+name: ci
+
+on:
+    push:
+        branches:
+            - master
+    pull_request:
+        branches:
+            - master
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ci-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - run: npm run lint
+
+    format:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - run: npm run format:check
+
+    typecheck:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - run: npm run typecheck
+
+    build-core:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - run: npm run build
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+                  retention-days: 1
+                  if-no-files-found: error
+
+    typecheck-packages:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npm run typecheck:packages
+
+    test-core:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npm test
+
+    test-fake-server:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-fake-server
+            - run: npm test -w packages/fake-server
+
+    test-media-utils:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+
+            - name: install ffmpeg and ffprobe
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y ffmpeg
+
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-media-utils
+            - run: npm test -w packages/media-utils
+
+    test-sqlite:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-store-sqlite
+            - run: npm test -w packages/store-sqlite
+            # better-sqlite3 is an optional peer: prove the whole store surface
+            # also works on the built-in node:sqlite backend.
+            - run: npm test -w packages/store-sqlite
+              env:
+                  HOSHINO_SQLITE_TEST_DRIVER: node
+            # Both runs above resolve with the addon present, so neither takes
+            # the auto -> node fallback this package exists for. Delete the
+            # addon and run once more: the suite then asserts auto picked the
+            # built-in driver. Last step in the job - nothing after it needs
+            # better-sqlite3.
+            - name: auto fallback with no native addon
+              run: |
+                  rm -rf node_modules/better-sqlite3 packages/store-sqlite/node_modules/better-sqlite3
+                  npm test -w packages/store-sqlite
+
+    test-mcp-server:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-fake-server --filter=@revizahoshii/hoshino-store-sqlite --filter=@revizahoshii/hoshino-media-utils --filter=@revizahoshii/hoshino-mcp-server
+            - run: npm test -w packages/mcp-server
+
+    test-voip:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-voip
+            - run: npm test -w packages/voip
+
+    test-wam:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-wam
+            - run: npm test -w packages/wam
+
+    test-native:
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        needs: build-core
+
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  # third-party actions run after this checkout; do not leave
+                  # the token readable in git config
+                  persist-credentials: false
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy, rustfmt
+                  targets: wasm32-unknown-unknown
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: packages/native
+
+            # fmt + clippy; the workspace default-members are the NAPI crate +
+            # core, so this compiles and lints the NAPI code without building
+            # the addon. The wasm crate is linted on its own target (it sits
+            # outside default-members so its getrandom/js feature never
+            # unifies into the native build).
+            - name: rust lint
+              working-directory: packages/native
+              run: |
+                  cargo fmt --check
+                  cargo clippy --all-targets
+                  cargo clippy -p hoshino-native-wasm --target wasm32-unknown-unknown
+
+            # prebuilt binary in seconds instead of `cargo install` (~3 min);
+            # version must match the wasm-bindgen crate pin in
+            # packages/native/wasm/Cargo.toml (=0.2.100)
+            - name: install wasm-bindgen-cli
+              uses: taiki-e/install-action@v2
+              with:
+                  tool: wasm-bindgen@0.2.100
+
+            - name: build wasm backend
+              run: npm run build:wasm -w packages/native
+
+            - name: cross-check wasm vs pure JS
+              run: node --import tsx packages/native/__test__/cross-check.cjs
+              env:
+                  HOSHINO_NATIVE_BACKEND: wasm
+
+            # clippy compiles the NAPI crate but cannot catch generated-binding
+            # or module-load failures; build the addon and run it once
+            - name: build and cross-check napi backend
+              run: |
+                  npm run build:napi -w packages/native
+                  node --import tsx packages/native/__test__/cross-check.cjs
+              env:
+                  HOSHINO_NATIVE_BACKEND: napi
+
+            - name: core suite over the wasm backend
+              run: npm test
+              env:
+                  HOSHINO_NATIVE_BACKEND: wasm
+
+    test-mysql:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        services:
+            mysql:
+                image: mysql:8
+                env:
+                    MYSQL_ROOT_PASSWORD: test
+                    MYSQL_DATABASE: hoshino_test
+                ports:
+                    - 3306:3306
+                options: >-
+                    --health-cmd="mysqladmin ping -h localhost -u root -ptest"
+                    --health-interval=3s
+                    --health-retries=10
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-store-mysql
+            - run: npm test -w packages/store-mysql
+              env:
+                  HOSHINO_TEST_MYSQL_HOST: localhost
+                  HOSHINO_TEST_MYSQL_PORT: '3306'
+                  HOSHINO_TEST_MYSQL_USER: root
+                  HOSHINO_TEST_MYSQL_PASSWORD: test
+                  HOSHINO_TEST_MYSQL_DATABASE: hoshino_test
+
+    test-postgres:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_PASSWORD: test
+                    POSTGRES_DB: hoshino_test
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd="pg_isready -U postgres"
+                    --health-interval=3s
+                    --health-retries=10
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-store-postgres
+            - run: npm test -w packages/store-postgres
+              env:
+                  HOSHINO_TEST_PG_HOST: localhost
+                  HOSHINO_TEST_PG_PORT: '5432'
+                  HOSHINO_TEST_PG_USER: postgres
+                  HOSHINO_TEST_PG_PASSWORD: test
+                  HOSHINO_TEST_PG_DATABASE: hoshino_test
+
+    test-redis:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        services:
+            redis:
+                image: redis:7-alpine
+                ports:
+                    - 6379:6379
+                options: >-
+                    --health-cmd="redis-cli ping"
+                    --health-interval=3s
+                    --health-retries=10
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-store-redis
+            - run: npm test -w packages/store-redis
+              env:
+                  HOSHINO_TEST_REDIS_HOST: localhost
+                  HOSHINO_TEST_REDIS_PORT: '6379'
+
+    test-mongo:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        needs: build-core
+
+        steps:
+            - name: start mongo replica set
+              run: |
+                  docker run -d --name mongo -p 27017:27017 mongo:7 mongod --replSet rs0
+                  until docker exec mongo mongosh --eval "rs.initiate()" --quiet 2>/dev/null; do
+                    sleep 1
+                  done
+
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/setup-node
+            - uses: actions/download-artifact@v4
+              with:
+                  name: core-build
+                  path: dist/
+            - run: npx turbo run build --filter=@revizahoshii/hoshino-store-mongo
+            - run: npm test -w packages/store-mongo
+              env:
+                  HOSHINO_TEST_MONGO_HOST: localhost
+                  HOSHINO_TEST_MONGO_PORT: '27017'
+
+    all-checks:
+        name: all checks
+        if: always()
+        runs-on: ubuntu-latest
+        timeout-minutes: 1
+        needs:
+            - lint
+            - format
+            - typecheck
+            - build-core
+            - typecheck-packages
+            - test-core
+            - test-fake-server
+            - test-media-utils
+            - test-sqlite
+            - test-mcp-server
+            - test-voip
+            - test-wam
+            - test-native
+            - test-mysql
+            - test-postgres
+            - test-redis
+            - test-mongo
+
+        steps:
+            - name: verify all needs succeeded
+              if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+              run: exit 1
+            - run: echo "all checks passed"

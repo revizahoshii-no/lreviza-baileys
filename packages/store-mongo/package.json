@@ -1,0 +1,45 @@
+{
+    "name": "@revizahoshii/hoshino-store-mongo",
+    "version": "1.2.0",
+    "description": "MongoDB store provider for @revizahoshii/hoshino",
+    "license": "MIT",
+    "author": "vinikjkkj <contact@vinicius.email> (https://github.com/vinikjkkj)",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/revizahoshii-no/lreviza-baileys.git",
+        "directory": "packages/store-mongo"
+    },
+    "main": "dist/index.js",
+    "module": "dist/esm/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "require": "./dist/index.js",
+            "import": "./dist/esm/index.js",
+            "default": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.build.cjs.json && tsc -p tsconfig.build.esm.json && node ../../scripts/finalize-esm-build.cjs",
+        "typecheck": "tsc --noEmit",
+        "test": "node --import tsx --test \"src/**/__tests__/**/*.test.ts\""
+    },
+    "peerDependencies": {
+        "@revizahoshii/hoshino": "^1.7.0",
+        "mongodb": ">=6.0.0"
+    },
+    "devDependencies": {
+        "mongodb": "^6.16.0",
+        "@revizahoshii/hoshino": "file:../.."
+    },
+    "engines": {
+        "node": ">=20.9.0"
+    }
+}

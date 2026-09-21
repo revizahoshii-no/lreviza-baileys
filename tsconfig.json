@@ -1,0 +1,163 @@
+{
+    "compilerOptions": {
+        "target": "ES2020",
+        "module": "CommonJS",
+        "moduleResolution": "Node",
+        "baseUrl": ".",
+        "paths": {
+            "@revizahoshii/hoshino": [
+                "src"
+            ],
+            "@revizahoshii/hoshino/store": [
+                "src/store"
+            ],
+            "@revizahoshii/hoshino/signal": [
+                "src/signal"
+            ],
+            "@revizahoshii/hoshino/auth": [
+                "src/auth"
+            ],
+            "@revizahoshii/hoshino/appstate": [
+                "src/appstate"
+            ],
+            "@revizahoshii/hoshino/retry": [
+                "src/retry"
+            ],
+            "@revizahoshii/hoshino/proto": [
+                "src/proto"
+            ],
+            "@revizahoshii/hoshino/protocol": [
+                "src/protocol"
+            ],
+            "@revizahoshii/hoshino/crypto": [
+                "src/crypto"
+            ],
+            "@revizahoshii/hoshino/media": [
+                "src/media"
+            ],
+            "@revizahoshii/hoshino/util": [
+                "src/util"
+            ],
+            "@revizahoshii/hoshino/transport": [
+                "src/transport"
+            ],
+            "@abprops-spec": [
+                "src/abprops-spec"
+            ],
+            "@appstate": [
+                "src/appstate"
+            ],
+            "@appstate/*": [
+                "src/appstate/*"
+            ],
+            "@appstate-spec": [
+                "src/appstate-spec"
+            ],
+            "@auth": [
+                "src/auth"
+            ],
+            "@auth/*": [
+                "src/auth/*"
+            ],
+            "@client": [
+                "src/client"
+            ],
+            "@client/*": [
+                "src/client/*"
+            ],
+            "@crypto": [
+                "src/crypto"
+            ],
+            "@crypto/*": [
+                "src/crypto/*"
+            ],
+            "@infra/*": [
+                "src/infra/*"
+            ],
+            "@media": [
+                "src/media"
+            ],
+            "@media/*": [
+                "src/media/*"
+            ],
+            "@message": [
+                "src/message"
+            ],
+            "@message/*": [
+                "src/message/*"
+            ],
+            "@protocol": [
+                "src/protocol"
+            ],
+            "@protocol/*": [
+                "src/protocol/*"
+            ],
+            "@proto": [
+                "src/proto"
+            ],
+            "@mex": [
+                "src/mex"
+            ],
+            "@retry": [
+                "src/retry"
+            ],
+            "@retry/*": [
+                "src/retry/*"
+            ],
+            "@signal": [
+                "src/signal"
+            ],
+            "@signal/*": [
+                "src/signal/*"
+            ],
+            "@store": [
+                "src/store"
+            ],
+            "@store/*": [
+                "src/store/*"
+            ],
+            "@transport": [
+                "src/transport"
+            ],
+            "@transport/*": [
+                "src/transport/*"
+            ],
+            "@util/*": [
+                "src/util/*"
+            ],
+            "@version-spec": [
+                "src/version-spec"
+            ],
+            "@revizahoshii/hoshino-*": [
+                "packages/*/src"
+            ],
+            "@reviza": [
+                "src/reviza"
+            ],
+            "@reviza/*": [
+                "src/reviza/*"
+            ]
+        },
+        "strict": true,
+        "declaration": true,
+        "sourceMap": false,
+        "outDir": "dist",
+        "rootDir": "src",
+        "lib": [
+            "ES2020"
+        ],
+        "types": [
+            "node"
+        ],
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "skipLibCheck": true
+    },
+    "include": [
+        "src/**/*"
+    ],
+    "exclude": [
+        "dist",
+        "node_modules"
+    ]
+}

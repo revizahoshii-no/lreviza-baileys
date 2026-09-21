@@ -1,0 +1,65 @@
+{
+    "name": "@revizahoshii/hoshino-native",
+    "version": "0.1.0",
+    "description": "Native accelerators for @revizahoshii/hoshino (Rust NAPI addon + WASM fallback)",
+    "license": "MIT",
+    "author": "vinikjkkj <contact@vinicius.email> (https://github.com/vinikjkkj)",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/revizahoshii-no/lreviza-baileys.git",
+        "directory": "packages/native"
+    },
+    "keywords": [
+        "hoshino",
+        "napi",
+        "wasm",
+        "x25519",
+        "xeddsa",
+        "curve25519",
+        "crypto"
+    ],
+    "types": "binding.d.ts",
+    "exports": {
+        ".": {
+            "types": "./binding.d.ts",
+            "default": "./binding.js"
+        },
+        "./wasm/*": "./wasm/*"
+    },
+    "files": [
+        "wasm/pkg"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "peerDependencies": {
+        "@revizahoshii/hoshino": "^1.7.0"
+    },
+    "peerDependenciesMeta": {
+        "@revizahoshii/hoshino": {
+            "optional": true
+        }
+    },
+    "engines": {
+        "node": ">=20.19.0"
+    },
+    "napi": {
+        "binaryName": "hoshino-native",
+        "targets": [
+            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-gnu",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin"
+        ]
+    },
+    "scripts": {
+        "build:napi": "napi build --platform --release --js binding.js --dts binding.d.ts",
+        "build:napi:debug": "napi build --platform --js binding.js --dts binding.d.ts",
+        "build:wasm": "cargo build -p hoshino-native-wasm --release --target wasm32-unknown-unknown --target-dir target && wasm-bindgen --target web --out-dir wasm/pkg target/wasm32-unknown-unknown/release/hoshino_native_wasm.wasm && node -e \"require('node:fs').writeFileSync('wasm/pkg/package.json', JSON.stringify({ type: 'module' }) + '\\n')\""
+    },
+    "devDependencies": {
+        "@napi-rs/cli": "^3.0.0"
+    }
+}

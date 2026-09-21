@@ -1,0 +1,124 @@
+import type { WaRetryOutboundMessageRecord } from '@retry/types'
+import type {
+    WaChatMetadataSnapshot,
+    WaChatMetadataStore
+} from '@store/contracts/chat-metadata.store'
+import type { WaContactStore, WaStoredContactRecord } from '@store/contracts/contact.store'
+import type { WaDeviceListSnapshot, WaDeviceListStore } from '@store/contracts/device-list.store'
+import type {
+    WaGroupMetadataSnapshot,
+    WaGroupMetadataStore
+} from '@store/contracts/group-metadata.store'
+import type {
+    WaMessageSecretEntry,
+    WaMessageSecretStore
+} from '@store/contracts/message-secret.store'
+import type { WaMessageStore, WaStoredMessageRecord } from '@store/contracts/message.store'
+import type { WaRetryStore } from '@store/contracts/retry.store'
+import type { WaStoredThreadRecord, WaThreadStore } from '@store/contracts/thread.store'
+
+const EMPTY_STORE_LIST = Object.freeze([]) as readonly unknown[]
+
+export const NOOP_MESSAGE_SECRET_STORE: WaMessageSecretStore = Object.freeze({
+    get: async (_messageId: string): Promise<WaMessageSecretEntry | null> => null,
+    getBatch: async (
+        messageIds: readonly string[]
+    ): Promise<readonly (WaMessageSecretEntry | null)[]> =>
+        new Array<WaMessageSecretEntry | null>(messageIds.length).fill(null),
+    set: async (_messageId: string, _entry: WaMessageSecretEntry): Promise<void> => {},
+    setBatch: async (
+        _entries: readonly {
+            readonly messageId: string
+            readonly entry: WaMessageSecretEntry
+        }[]
+    ): Promise<void> => {},
+    cleanupExpired: async (_nowMs: number): Promise<number> => 0,
+    clear: async (): Promise<void> => {}
+})
+
+export const NOOP_MESSAGE_STORE: WaMessageStore = Object.freeze({
+    upsert: async (_record: WaStoredMessageRecord): Promise<void> => {},
+    upsertBatch: async (_records: readonly WaStoredMessageRecord[]): Promise<void> => {},
+    getById: async (_id: string): Promise<WaStoredMessageRecord | null> => null,
+    listByThread: async (
+        _threadJid: string,
+        _limit?: number,
+        _beforeTimestampMs?: number
+    ): Promise<readonly WaStoredMessageRecord[]> =>
+        EMPTY_STORE_LIST as readonly WaStoredMessageRecord[],
+    deleteById: async (_id: string): Promise<number> => 0,
+    clear: async (): Promise<void> => {}
+})
+
+export const NOOP_THREAD_STORE: WaThreadStore = Object.freeze({
+    upsert: async (_record: WaStoredThreadRecord): Promise<void> => {},
+    upsertBatch: async (_records: readonly WaStoredThreadRecord[]): Promise<void> => {},
+    getByJid: async (_jid: string): Promise<WaStoredThreadRecord | null> => null,
+    list: async (_limit?: number): Promise<readonly WaStoredThreadRecord[]> =>
+        EMPTY_STORE_LIST as readonly WaStoredThreadRecord[],
+    deleteByJid: async (_jid: string): Promise<number> => 0,
+    clear: async (): Promise<void> => {}
+})
+
+export const NOOP_CONTACT_STORE: WaContactStore = Object.freeze({
+    upsert: async (_record: WaStoredContactRecord): Promise<void> => {},
+    upsertBatch: async (_records: readonly WaStoredContactRecord[]): Promise<void> => {},
+    getByJid: async (_jid: string): Promise<WaStoredContactRecord | null> => null,
+    getByPhoneNumber: async (_pn: string): Promise<WaStoredContactRecord | null> => null,
+    deleteByJid: async (_jid: string): Promise<number> => 0,
+    clear: async (): Promise<void> => {}
+})
+
+export const NOOP_RETRY_STORE: WaRetryStore = Object.freeze({
+    getOutboundRequesterStatus: async (): Promise<null> => null,
+    upsertOutboundMessage: async (_record: WaRetryOutboundMessageRecord): Promise<void> => {},
+    deleteOutboundMessage: async (_messageId: string): Promise<number> => 0,
+    getOutboundMessage: async (_messageId: string): Promise<null> => null,
+    updateOutboundMessageState: async (): Promise<void> => {},
+    markOutboundRequesterDelivered: async (): Promise<void> => {},
+    incrementInboundCounter: async (): Promise<number> => 0,
+    cleanupExpired: async (_nowMs: number): Promise<number> => 0,
+    clear: async (): Promise<void> => {},
+    destroy: async (): Promise<void> => {}
+})
+
+export const NOOP_CHAT_METADATA_STORE: WaChatMetadataStore = Object.freeze({
+    upsertChatMetadata: async (_snapshot: WaChatMetadataSnapshot): Promise<void> => {},
+    getChatMetadata: async (
+        _chatJid: string,
+        _nowMs?: number
+    ): Promise<WaChatMetadataSnapshot | null> => null,
+    deleteChatMetadata: async (_chatJid: string): Promise<number> => 0,
+    cleanupExpired: async (_nowMs: number): Promise<number> => 0,
+    clear: async (): Promise<void> => {},
+    destroy: async (): Promise<void> => {}
+})
+
+export const NOOP_GROUP_METADATA_STORE: WaGroupMetadataStore = Object.freeze({
+    upsertGroupMetadata: async (_snapshot: WaGroupMetadataSnapshot): Promise<void> => {},
+    getGroupMetadata: async (
+        _groupJid: string,
+        _nowMs?: number
+    ): Promise<WaGroupMetadataSnapshot | null> => null,
+    deleteGroupMetadata: async (_groupJid: string): Promise<number> => 0,
+    cleanupExpired: async (_nowMs: number): Promise<number> => 0,
+    clear: async (): Promise<void> => {},
+    destroy: async (): Promise<void> => {}
+})
+
+export const NOOP_DEVICE_LIST_STORE: WaDeviceListStore = Object.freeze({
+    upsertUserDevicesBatch: async (
+        _snapshots: readonly WaDeviceListSnapshot[]
+    ): Promise<void> => {},
+    getUserDevicesBatch: async (
+        userJids: readonly string[],
+        _nowMs?: number
+    ): Promise<readonly (WaDeviceListSnapshot | null)[]> =>
+        new Array<WaDeviceListSnapshot | null>(userJids.length).fill(null),
+    findByAnyUserJid: async (_jid: string, _nowMs?: number): Promise<WaDeviceListSnapshot | null> =>
+        null,
+    deleteUserDevices: async (_userJid: string): Promise<number> => 0,
+    cleanupExpired: async (_nowMs: number): Promise<number> => 0,
+    clear: async (): Promise<void> => {},
+    destroy: async (): Promise<void> => {}
+})
