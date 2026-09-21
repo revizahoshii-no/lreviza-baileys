@@ -32,7 +32,7 @@
         "test": "node --import tsx --test \"src/**/__tests__/**/*.test.ts\""
     },
     "peerDependencies": {
-        "@revizahoshii/hoshino": "^1.7.0",
+        "@revizahoshii/hoshino": "^1.0.0",
         "ioredis": ">=5.0.0"
     },
     "devDependencies": {

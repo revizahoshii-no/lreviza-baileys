@@ -6,9 +6,11 @@
  */
 
 export {
+    bindVerifiedReply,
     buildVerifiedContextInfo,
     buildVerifiedNewsletterInfo,
     createOfficialQuote,
+    createVerifiedQuote,
     fetchProfileThumbnail,
     OFFICIAL_QUOTE_JID,
     VERIFIED_PRESETS,
@@ -20,7 +22,8 @@ export type {
     OfficialQuoteOptions,
     VerifiedContentTypeValue,
     VerifiedContextOptions,
-    VerifiedNewsletterOptions
+    VerifiedNewsletterOptions,
+    VerifiedReplyTarget
 } from '@reviza/verified-reply'
 
 export { buildAlbumChildContextInfo, buildAlbumOpener, MESSAGE_ASSOCIATION_ALBUM } from '@reviza/album'
@@ -39,5 +42,47 @@ export type {
     UrlButton
 } from '@reviza/button-builder'
 
-export { buildAiRichMessage, buildCodeMessage, buildTableMessage, RichSubMessageType } from '@reviza/ai-rich'
-export type { AiRichInput, RichCodeInput, RichTableInput } from '@reviza/ai-rich'
+export {
+    botMetadataCertificate,
+    botMetadataSignature,
+    buildAiRichMessage,
+    buildCodeMessage,
+    buildTableMessage,
+    CodeHighlightType,
+    RichSubMessageType,
+    tokenizeCode,
+    toUnified,
+    wrapToBotForwardedMessage
+} from '@reviza/ai-rich'
+export type {
+    AiRichInput,
+    CodeBlockToken,
+    RichCodeInput,
+    RichSubmessage,
+    RichTableInput,
+    WrapBotForwardedOptions
+} from '@reviza/ai-rich'
+
+export {
+    AssociationType,
+    BIZ_BOT_SUPPORT_PAYLOAD,
+    ButtonHeaderType,
+    ButtonType,
+    CarouselCardType,
+    LIBRARY_NAME,
+    ListType,
+    META_AI_JID,
+    OFFICIAL_BIZ_JID,
+    STORIES_JID
+} from '@reviza/constants'
+
+export {
+    hasValidAlbumMedia,
+    hasValidCarouselHeader,
+    hasValidInteractiveHeader,
+    isJidBot,
+    isJidMetaAI,
+    isMetaAiAccount
+} from '@reviza/helpers'
+
+export { LANGUAGE_KEYWORDS, LEXER_REGEX } from '@reviza/language-keywords'

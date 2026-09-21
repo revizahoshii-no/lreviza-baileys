@@ -13,6 +13,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type { Proto } from '@proto'
+import { STORIES_JID } from '@reviza/constants'
 
 /** Tipe konten yang ditampilkan pada label kutipan saluran. */
 export const VerifiedContentType = {
@@ -36,7 +37,6 @@ export const VERIFIED_PRESETS: Record<string, { name: string; jid: string }> = {
  */
 export const OFFICIAL_QUOTE_JID = '0@s.whatsapp.net'
 
-const STORIES_JID = 'status@broadcast'
 
 const randomServerMessageId = (): number => Math.floor(Math.random() * 1_000_000) + 1
 
@@ -228,6 +228,35 @@ export const withOfficialQuote = <T extends Record<string, unknown>>(
 }
 
 /**
+ * Buat objek `quoted` bergaya saluran terverifikasi.
+ *
+ * Berbeda dari {@link createOfficialQuote} yang meniru Status akun resmi,
+ * fungsi ini meniru kutipan dari sebuah saluran (newsletter) bercentang.
+ *
+ * ```ts
+ * const quoted = createVerifiedQuote({ preset: 'meta' })
+ * await client.messages.send(jid, { conversation: 'Halo' }, { quoted })
+ * ```
+ */
+export const createVerifiedQuote = (options: VerifiedContextOptions = {}) => {
+    const { text = '', participant = OFFICIAL_QUOTE_JID, quotedMessage, ...rest } = options
+    const info = buildVerifiedNewsletterInfo(rest)
+
+    return {
+        key: {
+            fromMe: false,
+            id: randomStanzaId(),
+            remoteJid: info.newsletterJid,
+            participant
+        },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        pushName: info.newsletterName,
+        message: quotedMessage ?? { conversation: text || info.newsletterName },
+        verifiedBizName: info.newsletterName
+    }
+}
+
+/**
  * Ambil foto profil sebuah JID sebagai bytes, untuk dipakai jadi thumbnail kutipan.
  * Mengembalikan null bila tidak punya foto profil atau gagal diunduh.
  */
@@ -252,4 +281,46 @@ export const fetchProfileThumbnail = async (
     } catch {
         return null
     }
+}
+
+export interface VerifiedReplyTarget {
+    sendMessage?: (jid: string, content: unknown, options?: unknown) => Promise<unknown>
+    sendVerifiedReply?: unknown
+    sendOfficialReply?: unknown
+}
+
+/**
+ * Pasang helper `sendVerifiedReply` dan `sendOfficialReply` pada client.
+ *
+ * Setelah dipanggil sekali, kedua method bisa dipakai langsung:
+ *
+ * ```ts
+ * bindVerifiedReply(client)
+ * await client.sendOfficialReply(jid, { text: 'Halo' }, { name: 'REVIZA', waid: '6283134978318' })
+ * ```
+ *
+ * Aman dipanggil berulang: bila sudah terpasang, fungsi langsung keluar.
+ */
+export const bindVerifiedReply = <T extends VerifiedReplyTarget>(client: T): T => {
+    if (!client || typeof client.sendMessage !== 'function' || client.sendVerifiedReply) {
+        return client
+    }
+
+    Object.assign(client, {
+        sendVerifiedReply: async (
+            jid: string,
+            content: Record<string, unknown>,
+            options: VerifiedContextOptions = {},
+            sendOptions: unknown = {}
+        ) => client.sendMessage!(jid, withVerifiedReply(content, options), sendOptions),
+
+        sendOfficialReply: async (
+            jid: string,
+            content: Record<string, unknown>,
+            options: OfficialQuoteOptions = {},
+            sendOptions: unknown = {}
+        ) => client.sendMessage!(jid, withOfficialQuote(content, options), sendOptions)
+    })
+
+    return client
 }

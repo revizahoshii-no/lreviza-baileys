@@ -36,7 +36,7 @@
         "@vinikjkkj/wa-wam": "2.3000.1041713829-1ec0d3b"
     },
     "peerDependencies": {
-        "@revizahoshii/hoshino": "^1.5.0"
+        "@revizahoshii/hoshino": "^1.0.0"
     },
     "devDependencies": {
         "@revizahoshii/hoshino": "file:../.."

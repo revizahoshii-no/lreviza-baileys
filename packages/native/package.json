@@ -33,7 +33,7 @@
         "access": "public"
     },
     "peerDependencies": {
-        "@revizahoshii/hoshino": "^1.7.0"
+        "@revizahoshii/hoshino": "^1.0.0"
     },
     "peerDependenciesMeta": {
         "@revizahoshii/hoshino": {
