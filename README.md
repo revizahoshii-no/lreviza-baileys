@@ -34,7 +34,8 @@ Node.js >= 22 untuk membangun dari source. Untuk memakai paket jadi, Node >= 20 
 import { WaClient, createStore, createPinoLogger } from '@revizahoshii/hoshino'
 
 const client = new WaClient({
-    store: createStore(),
+    sessionId: 'namasesi',        // WAJIB, tidak boleh kosong
+    store: createStore(),          // memory-only: kredensial hilang saat restart
     logger: createPinoLogger({ level: 'info' })
 })
 
@@ -43,6 +44,36 @@ client.on('message', async (msg) => console.log('pesan masuk:', msg))
 
 await client.connect()
 ```
+
+> **Untuk produksi, jangan pakai `createStore()` polos.** Store bawaan bersifat
+> memory-only — kredensial hilang setiap restart dan bot minta pairing ulang.
+> Pakai store persisten:
+
+```bash
+npm install @revizahoshii/hoshino-store-sqlite better-sqlite3
+```
+
+```ts
+import { createSqliteStore } from '@revizahoshii/hoshino-store-sqlite'
+
+const backend = await createSqliteStore({ path: './sesi.db' })
+
+const store = createStore({
+    backends: { sqlite: backend },
+    providers: {
+        auth: 'sqlite', preKey: 'sqlite', session: 'sqlite', identity: 'sqlite',
+        senderKey: 'sqlite', signal: 'sqlite', appState: 'sqlite',
+        privacyToken: 'sqlite', messages: 'sqlite', threads: 'sqlite', contacts: 'sqlite'
+    }
+})
+
+const client = new WaClient({ sessionId: 'namasesi', store, logger })
+```
+
+Catatan: parameternya `path` (bukan `filename`). Bila `backends` diisi, **semua**
+domain di `providers` wajib diisi — melewatkan satu membuat `createStore` melempar
+error yang menyebut domain mana yang kurang. File database dibuat lazy saat
+penulisan pertama.
 
 ### Pairing code (tanpa QR)
 
@@ -537,7 +568,6 @@ import {
 | `@revizahoshii/hoshino-store-mongo` | penyimpanan MongoDB |
 | `@revizahoshii/hoshino-voip` | panggilan suara |
 | `@revizahoshii/hoshino-media-utils` | utilitas media |
-| `@revizahoshii/hoshino-native` | backend kripto native/WASM |
 | `@revizahoshii/hoshino-wam` | WAM logging |
 
 ---
